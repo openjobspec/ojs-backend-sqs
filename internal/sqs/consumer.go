@@ -15,14 +15,16 @@ import (
 // receiveFromSQS receives messages from an SQS queue.
 // SQS ReceiveMessage returns max 10 messages per call.
 // For count > 10, multiple calls are made.
-func (b *SQSBackend) receiveFromSQS(ctx context.Context, ojsQueue string, count int, visibilityTimeoutSec int32) ([]*core.Job, error) {
+// Returns the jobs and a map of job ID to SQS receipt handle.
+func (b *SQSBackend) receiveFromSQS(ctx context.Context, ojsQueue string, count int, visibilityTimeoutSec int32) ([]*core.Job, map[string]string, error) {
 	queueURL, err := b.getQueueURL(ctx, ojsQueue)
 	if err != nil {
 		// Queue might not exist yet
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var jobs []*core.Job
+	receiptHandles := make(map[string]string)
 	remaining := count
 
 	for remaining > 0 {
@@ -41,7 +43,7 @@ func (b *SQSBackend) receiveFromSQS(ctx context.Context, ojsQueue string, count 
 
 		result, err := b.sqsClient.ReceiveMessage(ctx, input)
 		if err != nil {
-			return jobs, fmt.Errorf("SQS ReceiveMessage: %w", err)
+			return jobs, receiptHandles, fmt.Errorf("SQS ReceiveMessage: %w", err)
 		}
 
 		if len(result.Messages) == 0 {
@@ -55,8 +57,8 @@ func (b *SQSBackend) receiveFromSQS(ctx context.Context, ojsQueue string, count 
 				continue
 			}
 
-			// Set the receipt handle for later ack/nack
-			job.SQSReceiptHandle = *msg.ReceiptHandle
+			// Track the receipt handle for later ack/nack
+			receiptHandles[job.ID] = *msg.ReceiptHandle
 
 			// Check if job has expired
 			if job.ExpiresAt != "" {
@@ -83,18 +85,18 @@ func (b *SQSBackend) receiveFromSQS(ctx context.Context, ojsQueue string, count 
 		}
 	}
 
-	return jobs, nil
+	return jobs, receiptHandles, nil
 }
 
 // activateJob updates a job's state to active in the state store.
-func (b *SQSBackend) activateJob(ctx context.Context, job *core.Job, workerID string, visibilityTimeoutMs int) error {
+func (b *SQSBackend) activateJob(ctx context.Context, job *core.Job, workerID string, visibilityTimeoutMs int, receiptHandle string) error {
 	now := core.NowFormatted()
 
 	updates := map[string]any{
 		"state":              core.StateActive,
 		"started_at":         now,
 		"worker_id":          workerID,
-		"sqs_receipt_handle": job.SQSReceiptHandle,
+		"sqs_receipt_handle": receiptHandle,
 	}
 
 	record, _ := b.store.GetJob(ctx, job.ID)
@@ -105,7 +107,7 @@ func (b *SQSBackend) activateJob(ctx context.Context, job *core.Job, workerID st
 		job.StartedAt = now
 		r := state.JobToRecord(job)
 		r.WorkerID = workerID
-		r.SQSReceiptHandle = job.SQSReceiptHandle
+		r.SQSReceiptHandle = receiptHandle
 		return b.store.PutJob(ctx, r)
 	}
 

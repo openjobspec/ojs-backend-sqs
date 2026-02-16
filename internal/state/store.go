@@ -177,7 +177,6 @@ func RecordToJob(r *JobRecord) *core.Job {
 		VisibilityTimeoutMs: r.VisibilityTimeoutMs,
 		WorkflowID:          r.WorkflowID,
 		WorkflowStep:        r.WorkflowStep,
-		SQSReceiptHandle:    r.SQSReceiptHandle,
 	}
 
 	if r.Args != "" {
