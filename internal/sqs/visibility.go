@@ -6,6 +6,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
+	"github.com/openjobspec/ojs-backend-sqs/internal/core"
 )
 
 // changeMessageVisibility extends or resets the visibility timeout of an SQS message.
@@ -34,7 +36,7 @@ func (b *SQSBackend) changeMessageVisibility(ctx context.Context, ojsQueue, rece
 func (b *SQSBackend) extendVisibility(ctx context.Context, ojsQueue, receiptHandle string, visibilityTimeoutMs int) error {
 	timeoutSec := int32(visibilityTimeoutMs / 1000)
 	if timeoutSec < 1 {
-		timeoutSec = 30 // default 30s
+		timeoutSec = int32(core.DefaultVisibilityTimeoutMs / 1000)
 	}
 	// SQS max visibility timeout is 12 hours (43200 seconds)
 	if timeoutSec > 43200 {

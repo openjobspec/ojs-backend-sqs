@@ -3,11 +3,14 @@ package sqs
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+
+	"github.com/openjobspec/ojs-backend-sqs/internal/core"
 )
 
 // SQS queue naming convention:
@@ -54,7 +57,7 @@ func (b *SQSBackend) getOrCreateQueueURL(ctx context.Context, ojsQueue string) (
 	sqsName := b.sqsQueueName(ojsQueue)
 	attrs := map[string]string{
 		"ReceiveMessageWaitTimeSeconds": "20", // Long polling
-		"VisibilityTimeout":             "30", // Default 30s
+		"VisibilityTimeout":             strconv.Itoa(core.DefaultVisibilityTimeoutMs / 1000),
 		"MessageRetentionPeriod":        "1209600", // 14 days
 	}
 

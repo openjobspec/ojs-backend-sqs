@@ -183,7 +183,7 @@ func (b *SQSBackend) Fetch(ctx context.Context, queues []string, count int, work
 		// Calculate visibility timeout
 		effectiveVisTimeout := visibilityTimeoutMs
 		if effectiveVisTimeout <= 0 {
-			effectiveVisTimeout = 30000 // default 30s
+			effectiveVisTimeout = core.DefaultVisibilityTimeoutMs
 		}
 		visTimeoutSec := int32(effectiveVisTimeout / 1000)
 
