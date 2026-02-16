@@ -3,6 +3,73 @@ package core
 import (
 	"context"
 	"encoding/json"
+
+	common "github.com/openjobspec/ojs-go-backend-common/core"
+)
+
+// Type aliases for shared types — allows internal packages to continue using core.X
+type Job = common.Job
+type OJSError = common.OJSError
+type RetryPolicy = common.RetryPolicy
+type UniquePolicy = common.UniquePolicy
+type EnqueueRequest = common.EnqueueRequest
+type EnqueueOptions = common.EnqueueOptions
+type FetchRequest = common.FetchRequest
+type AckRequest = common.AckRequest
+type NackRequest = common.NackRequest
+type JobError = common.JobError
+type HeartbeatRequest = common.HeartbeatRequest
+type BatchEnqueueRequest = common.BatchEnqueueRequest
+type RateLimitPolicy = common.RateLimitPolicy
+
+// Constant aliases for shared constants.
+const (
+	StateAvailable = common.StateAvailable
+	StateScheduled = common.StateScheduled
+	StatePending   = common.StatePending
+	StateActive    = common.StateActive
+	StateRetryable = common.StateRetryable
+	StateCompleted = common.StateCompleted
+	StateCancelled = common.StateCancelled
+	StateDiscarded = common.StateDiscarded
+
+	ErrCodeInvalidRequest  = common.ErrCodeInvalidRequest
+	ErrCodeValidationError = common.ErrCodeValidationError
+	ErrCodeNotFound        = common.ErrCodeNotFound
+	ErrCodeConflict        = common.ErrCodeConflict
+	ErrCodeDuplicate       = common.ErrCodeDuplicate
+	ErrCodeInternalError   = common.ErrCodeInternalError
+	ErrCodeUnsupported     = common.ErrCodeUnsupported
+	ErrCodeQueuePaused     = common.ErrCodeQueuePaused
+
+	OJSVersion              = common.OJSVersion
+	OJSMediaType            = common.OJSMediaType
+	TimeFormat              = common.TimeFormat
+	DefaultVisibilityTimeoutMs = common.DefaultVisibilityTimeoutMs
+)
+
+// Function aliases for shared functions.
+var (
+	NewUUIDv7              = common.NewUUIDv7
+	IsValidUUIDv7          = common.IsValidUUIDv7
+	IsValidUUID            = common.IsValidUUID
+	FormatTime             = common.FormatTime
+	NowFormatted           = common.NowFormatted
+	ParseEnqueueRequest    = common.ParseEnqueueRequest
+	ValidateEnqueueRequest = common.ValidateEnqueueRequest
+	CalculateBackoff       = common.CalculateBackoff
+	DefaultRetryPolicy     = common.DefaultRetryPolicy
+	ParseISO8601Duration   = common.ParseISO8601Duration
+	FormatISO8601Duration  = common.FormatISO8601Duration
+	IsValidTransition      = common.IsValidTransition
+	IsTerminalState        = common.IsTerminalState
+	IsCancellableState     = common.IsCancellableState
+	NewInvalidRequestError = common.NewInvalidRequestError
+	NewNotFoundError       = common.NewNotFoundError
+	NewConflictError       = common.NewConflictError
+	NewValidationError     = common.NewValidationError
+	NewInternalError       = common.NewInternalError
+	IsKnownJobField        = common.IsKnownJobField
 )
 
 // JobManager handles core job lifecycle operations.
@@ -52,6 +119,12 @@ type WorkflowManager interface {
 	AdvanceWorkflow(ctx context.Context, workflowID string, jobID string, result json.RawMessage, failed bool) error
 }
 
+// AdminManager handles admin listing operations.
+type AdminManager interface {
+	ListJobs(ctx context.Context, filters JobListFilters, limit, offset int) ([]*Job, int, error)
+	ListWorkers(ctx context.Context, limit, offset int) ([]*WorkerInfo, WorkerSummary, error)
+}
+
 // Backend defines the full interface for OJS backend implementations,
 // composing all role-specific interfaces.
 type Backend interface {
@@ -61,6 +134,7 @@ type Backend interface {
 	DeadLetterManager
 	CronManager
 	WorkflowManager
+	AdminManager
 
 	// Health returns the health status.
 	Health(ctx context.Context) (*HealthResponse, error)
@@ -208,4 +282,29 @@ type WorkflowCallback struct {
 	Type    string          `json:"type"`
 	Args    json.RawMessage `json:"args,omitempty"`
 	Options *EnqueueOptions `json:"options,omitempty"`
+}
+
+// JobListFilters represents supported filters for admin job listing.
+type JobListFilters struct {
+	State    string `json:"state,omitempty"`
+	Queue    string `json:"queue,omitempty"`
+	Type     string `json:"type,omitempty"`
+	WorkerID string `json:"worker_id,omitempty"`
+}
+
+// WorkerInfo represents admin-visible worker state.
+type WorkerInfo struct {
+	ID            string `json:"id"`
+	State         string `json:"state"`
+	Directive     string `json:"directive"`
+	ActiveJobs    int    `json:"active_jobs"`
+	LastHeartbeat string `json:"last_heartbeat,omitempty"`
+}
+
+// WorkerSummary represents aggregate worker counts.
+type WorkerSummary struct {
+	Total   int `json:"total"`
+	Running int `json:"running"`
+	Quiet   int `json:"quiet"`
+	Stale   int `json:"stale"`
 }
