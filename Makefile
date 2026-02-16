@@ -22,11 +22,10 @@ test:
 	go test ./... -race -cover
 
 lint:
-	@if command -v golangci-lint > /dev/null 2>&1; then \
-		golangci-lint run ./...; \
-	else \
-		go vet ./...; \
-	fi
+	golangci-lint run ./...
+
+lint-vet:
+	go vet ./...
 
 clean:
 	rm -rf bin/
