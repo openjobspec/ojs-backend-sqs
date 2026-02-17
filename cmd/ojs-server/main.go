@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -17,7 +16,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"google.golang.org/grpc"
 
+	"github.com/openjobspec/ojs-backend-sqs/internal/core"
 	ojsgrpc "github.com/openjobspec/ojs-backend-sqs/internal/grpc"
+	"github.com/openjobspec/ojs-backend-sqs/internal/metrics"
 	"github.com/openjobspec/ojs-backend-sqs/internal/scheduler"
 	"github.com/openjobspec/ojs-backend-sqs/internal/server"
 	sqsbackend "github.com/openjobspec/ojs-backend-sqs/internal/sqs"
@@ -56,6 +57,9 @@ func main() {
 	backend.SetLogger(logger)
 	defer backend.Close()
 
+	// Initialize Prometheus server info metric
+	metrics.Init(core.OJSVersion, "sqs")
+
 	logger.Info("SQS backend ready",
 		"prefix", cfg.SQSQueuePrefix,
 		"fifo", cfg.UseFIFO,
@@ -68,13 +72,13 @@ func main() {
 	defer sched.Stop()
 
 	// Create HTTP server
-	router := server.NewRouter(backend, logger)
+	router := server.NewRouter(backend, logger, cfg)
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		IdleTimeout:  cfg.IdleTimeout,
 	}
 
 	// Start server
@@ -111,7 +115,7 @@ func main() {
 	sched.Stop()
 	grpcServer.GracefulStop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
