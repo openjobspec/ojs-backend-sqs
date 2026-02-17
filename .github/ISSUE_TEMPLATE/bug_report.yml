@@ -1,12 +1,18 @@
 name: Bug Report
-description: Report a bug
-labels: [bug]
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a bug.
+
   - type: textarea
     id: description
     attributes:
       label: Description
-      description: A clear and concise description of the bug.
+      description: A clear and concise description of what the bug is.
     validations:
       required: true
 
@@ -15,6 +21,10 @@ body:
     attributes:
       label: Steps to Reproduce
       description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Set up...
+        2. Run...
+        3. See error...
     validations:
       required: true
 
@@ -30,14 +40,42 @@ body:
     id: actual
     attributes:
       label: Actual Behavior
-      description: What actually happened.
+      description: What actually happened. Include error messages or logs if applicable.
     validations:
       required: true
 
-  - type: textarea
-    id: context
+  - type: input
+    id: version
     attributes:
-      label: Additional Context
-      description: Any other context, logs, or screenshots.
+      label: Version
+      description: What version are you using?
+      placeholder: "e.g., v1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      description: Which OJS backend are you using?
+      options:
+        - Redis
+        - PostgreSQL
+        - Kafka
+        - NATS
+        - SQS
+        - Other / N/A
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Any relevant environment details (OS, language version, etc.).
+      placeholder: |
+        - OS: macOS 14.0
+        - Go: 1.22.0
+        - Redis: 7.2
     validations:
       required: false
