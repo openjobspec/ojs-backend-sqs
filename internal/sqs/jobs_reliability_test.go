@@ -138,6 +138,14 @@ func (m *storeMock) SetWorkerDirective(ctx context.Context, workerID, directive 
 	return nil
 }
 
+func (m *storeMock) ListAllJobs(ctx context.Context, filters core.JobListFilters, limit, offset int) ([]*core.Job, int, error) {
+	return []*core.Job{}, 0, nil
+}
+
+func (m *storeMock) ListAllWorkers(ctx context.Context, limit, offset int) ([]*core.WorkerInfo, core.WorkerSummary, error) {
+	return []*core.WorkerInfo{}, core.WorkerSummary{}, nil
+}
+
 func (m *storeMock) AddToDeadLetter(ctx context.Context, jobID string) error { return nil }
 
 func (m *storeMock) RemoveFromDeadLetter(ctx context.Context, jobID string) error { return nil }

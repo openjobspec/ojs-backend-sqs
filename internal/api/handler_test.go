@@ -131,6 +131,12 @@ func (m *mockBackend) ResumeQueue(ctx context.Context, name string) error { retu
 func (m *mockBackend) SetWorkerState(ctx context.Context, workerID string, state string) error {
 	return nil
 }
+func (m *mockBackend) ListJobs(ctx context.Context, filters core.JobListFilters, limit, offset int) ([]*core.Job, int, error) {
+	return []*core.Job{}, 0, nil
+}
+func (m *mockBackend) ListWorkers(ctx context.Context, limit, offset int) ([]*core.WorkerInfo, core.WorkerSummary, error) {
+	return []*core.WorkerInfo{}, core.WorkerSummary{}, nil
+}
 func (m *mockBackend) Close() error { return nil }
 
 // --- Job Handler Tests ---

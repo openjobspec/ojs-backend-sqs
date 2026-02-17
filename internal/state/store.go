@@ -100,6 +100,10 @@ type Store interface {
 	GetWorkerDirective(ctx context.Context, workerID string) (string, error)
 	SetWorkerDirective(ctx context.Context, workerID, directive string) error
 
+	// Admin operations
+	ListAllJobs(ctx context.Context, filters core.JobListFilters, limit, offset int) ([]*core.Job, int, error)
+	ListAllWorkers(ctx context.Context, limit, offset int) ([]*core.WorkerInfo, core.WorkerSummary, error)
+
 	// Dead letter operations
 	AddToDeadLetter(ctx context.Context, jobID string) error
 	RemoveFromDeadLetter(ctx context.Context, jobID string) error
