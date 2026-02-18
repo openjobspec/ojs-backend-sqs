@@ -10,6 +10,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	ojsotel "github.com/openjobspec/ojs-go-backend-common/otel"
+
 	"github.com/openjobspec/ojs-backend-sqs/internal/admin"
 	"github.com/openjobspec/ojs-backend-sqs/internal/api"
 	"github.com/openjobspec/ojs-backend-sqs/internal/core"
@@ -22,11 +24,17 @@ func NewRouter(backend core.Backend, logger *slog.Logger, cfgs ...Config) http.H
 	if len(cfgs) > 0 {
 		cfg = cfgs[0]
 	}
+	return NewRouterWithRealtime(backend, logger, cfg, nil, nil)
+}
 
+// NewRouterWithRealtime creates and configures the HTTP router with all OJS routes
+// including real-time SSE endpoints.
+func NewRouterWithRealtime(backend core.Backend, logger *slog.Logger, cfg Config, publisher core.EventPublisher, subscriber core.EventSubscriber) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
 	r.Use(middleware.Recoverer)
+	r.Use(ojsotel.HTTPMiddleware)
 	r.Use(metricsMiddleware)
 	r.Use(api.OJSHeaders)
 	r.Use(api.RequestLogger(logger))
@@ -50,6 +58,12 @@ func NewRouter(backend core.Backend, logger *slog.Logger, cfgs ...Config) http.H
 	workflowHandler := api.NewWorkflowHandler(backend)
 	batchHandler := api.NewBatchHandler(backend)
 	adminHandler := api.NewAdminHandler(backend)
+
+	// Wire event publisher into handlers
+	if publisher != nil {
+		jobHandler.SetEventPublisher(publisher)
+		workerHandler.SetEventPublisher(publisher)
+	}
 
 	// System endpoints
 	r.Get("/ojs/manifest", systemHandler.Manifest)
@@ -112,6 +126,13 @@ func NewRouter(backend core.Backend, logger *slog.Logger, cfgs ...Config) http.H
 	// Admin UI
 	r.Handle("/ojs/admin", http.RedirectHandler("/ojs/admin/", http.StatusMovedPermanently))
 	r.Mount("/ojs/admin/", http.StripPrefix("/ojs/admin/", admin.Handler()))
+
+	// Real-time SSE endpoints
+	if subscriber != nil {
+		sseHandler := api.NewSSEHandler(backend, subscriber)
+		r.Get("/ojs/v1/jobs/{id}/events", sseHandler.JobEvents)
+		r.Get("/ojs/v1/queues/{name}/events", sseHandler.QueueEvents)
+	}
 
 	return r
 }

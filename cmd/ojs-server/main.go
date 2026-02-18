@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"google.golang.org/grpc"
 
+	ojsotel "github.com/openjobspec/ojs-go-backend-common/otel"
+
 	"github.com/openjobspec/ojs-backend-sqs/internal/core"
 	ojsgrpc "github.com/openjobspec/ojs-backend-sqs/internal/grpc"
 	"github.com/openjobspec/ojs-backend-sqs/internal/metrics"
@@ -32,6 +34,30 @@ func main() {
 	slog.SetDefault(logger)
 
 	cfg := server.LoadConfig()
+	if cfg.APIKey == "" && !cfg.AllowInsecureNoAuth {
+		logger.Error("refusing to start without API authentication", "hint", "set OJS_API_KEY or OJS_ALLOW_INSECURE_NO_AUTH=true for local development")
+		os.Exit(1)
+	}
+	if cfg.AllowInsecureNoAuth {
+		slog.Warn("⚠️  RUNNING WITHOUT AUTHENTICATION — this is intended for local development only. Set OJS_API_KEY for any shared or production environment.")
+	}
+
+	// Initialize OpenTelemetry (opt-in via OJS_OTEL_ENABLED or OTEL_EXPORTER_OTLP_ENDPOINT)
+	otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if ep := os.Getenv("OJS_OTEL_ENDPOINT"); ep != "" {
+		otelEndpoint = ep
+	}
+	otelShutdown, otelErr := ojsotel.Init(context.Background(), ojsotel.Config{
+		ServiceName:    "ojs-backend-sqs",
+		ServiceVersion: core.OJSVersion,
+		Enabled:        os.Getenv("OJS_OTEL_ENABLED") == "true" || otelEndpoint != "",
+		Endpoint:       otelEndpoint,
+	})
+	if otelErr != nil {
+		logger.Error("failed to initialize OpenTelemetry", "error", otelErr)
+		os.Exit(1)
+	}
+	defer func() { _ = otelShutdown(context.Background()) }()
 
 	// Configure AWS SDK
 	awsCfg, err := buildAWSConfig(cfg)
@@ -71,8 +97,12 @@ func main() {
 	sched.Start()
 	defer sched.Stop()
 
-	// Create HTTP server
-	router := server.NewRouter(backend, logger, cfg)
+	// Initialize real-time Pub/Sub broker
+	broker := sqsbackend.NewPubSubBroker()
+	defer broker.Close()
+
+	// Create HTTP server with real-time support
+	router := server.NewRouterWithRealtime(backend, logger, cfg, broker, broker)
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
