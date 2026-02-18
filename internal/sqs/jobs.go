@@ -10,12 +10,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
+	ojsotel "github.com/openjobspec/ojs-go-backend-common/otel"
+
 	"github.com/openjobspec/ojs-backend-sqs/internal/core"
 	"github.com/openjobspec/ojs-backend-sqs/internal/state"
 )
 
 // Push enqueues a single job.
 func (b *SQSBackend) Push(ctx context.Context, job *core.Job) (*core.Job, error) {
+	ctx, span := ojsotel.StartJobSpan(ctx, "push", job.ID, job.Type, job.Queue)
+	defer span.End()
+
 	now := time.Now()
 
 	// Assign ID if not provided
