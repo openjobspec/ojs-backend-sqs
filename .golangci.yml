@@ -15,6 +15,9 @@ linters:
     - bodyclose
     - errname
     - errorlint
+    - gocyclo
+    - unparam
+    - noctx
 
 linters-settings:
   errcheck:
@@ -29,6 +32,8 @@ linters-settings:
     enable-all: true
     disable:
       - fieldalignment
+  gocyclo:
+    min-complexity: 15
 
 issues:
   exclude-rules:

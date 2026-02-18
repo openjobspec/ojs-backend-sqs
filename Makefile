@@ -16,6 +16,7 @@ run: build
 	AWS_SECRET_ACCESS_KEY=test \
 	DYNAMODB_TABLE=ojs-jobs \
 	SQS_QUEUE_PREFIX=ojs \
+	OJS_ALLOW_INSECURE_NO_AUTH=true \
 	./bin/ojs-server
 
 test:

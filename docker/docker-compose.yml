@@ -41,6 +41,7 @@ services:
       - SQS_QUEUE_PREFIX=ojs
       - SQS_USE_FIFO=false
       - REDIS_URL=redis://redis:6379
+      - OJS_ALLOW_INSECURE_NO_AUTH=true
     depends_on:
       localstack:
         condition: service_healthy
@@ -63,6 +64,7 @@ services:
       - SQS_QUEUE_PREFIX=ojs
       - SQS_USE_FIFO=false
       - REDIS_URL=redis://redis:6379
+      - OJS_ALLOW_INSECURE_NO_AUTH=true
     volumes:
       - ..:/app
     depends_on:

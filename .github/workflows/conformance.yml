@@ -58,7 +58,7 @@ jobs:
         working-directory: openjobspec/ojs-backend-sqs
         run: |
           go build -o bin/ojs-server ./cmd/ojs-server
-          OJS_PORT=8080 ./bin/ojs-server &
+          OJS_ALLOW_INSECURE_NO_AUTH=true OJS_PORT=8080 ./bin/ojs-server &
           sleep 3
 
       - name: Wait for server

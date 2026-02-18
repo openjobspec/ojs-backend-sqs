@@ -17,13 +17,13 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
         with:
-          version: latest
+          version: v1.64.8
 
   test:
     runs-on: ubuntu-latest
     services:
       localstack:
-        image: localstack/localstack:3
+        image: localstack/localstack:latest
         ports:
           - 4566:4566
         env:
@@ -50,6 +50,15 @@ jobs:
           go-version: "1.24.13"
       - name: Run tests
         run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: ${COVERAGE}%"
+          THRESHOLD=40
+          if [ "$(echo "${COVERAGE} < ${THRESHOLD}" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below minimum threshold of ${THRESHOLD}%"
+            exit 1
+          fi
       - name: Upload coverage
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
@@ -75,5 +84,5 @@ jobs:
           go-version: "1.24.13"
       - name: Run govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
