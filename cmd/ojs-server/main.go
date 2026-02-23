@@ -15,6 +15,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
 
 	ojsotel "github.com/openjobspec/ojs-go-backend-common/otel"
 
@@ -123,6 +126,10 @@ func main() {
 	// Start gRPC server
 	grpcServer := grpc.NewServer()
 	ojsgrpc.Register(grpcServer, backend)
+	healthSrv := health.NewServer()
+	healthpb.RegisterHealthServer(grpcServer, healthSrv)
+	healthSrv.SetServingStatus("ojs.v1.OJSService", healthpb.HealthCheckResponse_SERVING)
+	reflection.Register(grpcServer)
 
 	go func() {
 		lis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
