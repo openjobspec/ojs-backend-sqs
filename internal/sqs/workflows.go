@@ -3,6 +3,7 @@ package sqs
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/openjobspec/ojs-backend-sqs/internal/core"
@@ -367,11 +368,13 @@ func (b *SQSBackend) fireCallback(ctx context.Context, cb *core.WorkflowCallback
 	if cb.Options != nil && cb.Options.Queue != "" {
 		queue = cb.Options.Queue
 	}
-	b.Push(ctx, &core.Job{
+	if _, err := b.Push(ctx, &core.Job{
 		Type:  cb.Type,
 		Args:  cb.Args,
 		Queue: queue,
-	})
+	}); err != nil {
+		slog.Error("workflow: error firing callback", "type", cb.Type, "error", err)
+	}
 }
 
 // advanceWorkflow advances a workflow when a job completes or fails.
