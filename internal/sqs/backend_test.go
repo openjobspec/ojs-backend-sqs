@@ -387,3 +387,4 @@ func TestPushBatch_EmptyList(t *testing.T) {
 		t.Errorf("expected empty result, got %d jobs", len(jobs))
 	}
 }
+
