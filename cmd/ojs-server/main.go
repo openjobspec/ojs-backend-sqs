@@ -186,3 +186,4 @@ func buildAWSConfig(cfg server.Config) (aws.Config, error) {
 
 	return config.LoadDefaultConfig(context.Background(), opts...)
 }
+
