@@ -27,6 +27,7 @@ type SQSBackend struct {
 	useFIFO     bool
 	startTime   time.Time
 	logger      *slog.Logger
+	cpStore     *checkpointStore
 }
 
 // New creates a new SQSBackend.
@@ -39,6 +40,7 @@ func New(sqsClient *sqs.Client, store state.Store, queuePrefix string, useFIFO b
 		useFIFO:     useFIFO,
 		startTime:   time.Now(),
 		logger:      slog.Default(),
+		cpStore:     newCheckpointStore(),
 	}
 }
 

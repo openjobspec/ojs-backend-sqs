@@ -100,3 +100,20 @@ var (
 	NewInternalError       = common.NewInternalError
 	IsKnownJobField        = common.IsKnownJobField
 )
+
+// Checkpoint type aliases.
+type Checkpoint = common.Checkpoint
+type CheckpointManager = common.CheckpointManager
+type SaveCheckpointRequest = common.SaveCheckpointRequest
+
+// History type aliases.
+type HistoryManager = common.HistoryManager
+type HistoryEvent = common.HistoryEvent
+type HistoryActor = common.HistoryActor
+type HistoryPage = common.HistoryPage
+type JobLineage = common.JobLineage
+
+// Purge type aliases.
+type PurgeManager = common.PurgeManager
+type PurgeFilters = common.PurgeFilters
+type PurgeResult = common.PurgeResult
