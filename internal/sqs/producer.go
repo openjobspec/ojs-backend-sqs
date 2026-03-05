@@ -112,3 +112,4 @@ func (b *SQSBackend) sendBatchToSQS(ctx context.Context, jobs []*core.Job) error
 
 	return nil
 }
+
