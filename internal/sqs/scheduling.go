@@ -124,3 +124,4 @@ func (b *SQSBackend) PromoteRetries(ctx context.Context) error {
 
 	return firstErr
 }
+
