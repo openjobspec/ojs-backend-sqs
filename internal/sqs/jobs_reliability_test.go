@@ -247,3 +247,4 @@ func TestNack_RequeueReturnsUpdateError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
