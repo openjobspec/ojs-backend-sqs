@@ -15,3 +15,4 @@ type EventPublisher = common.EventPublisher
 type EventSubscriber = common.EventSubscriber
 
 var NewStateChangedEvent = common.NewStateChangedEvent
+
