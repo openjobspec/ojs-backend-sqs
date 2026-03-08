@@ -11,8 +11,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	commonapi "github.com/openjobspec/ojs-go-backend-common/api"
+	commoncore "github.com/openjobspec/ojs-go-backend-common/core"
 	"github.com/openjobspec/ojs-go-backend-common/events"
 	ojsotel "github.com/openjobspec/ojs-go-backend-common/otel"
+	"github.com/openjobspec/ojs-go-backend-common/registry"
 
 	"github.com/openjobspec/ojs-backend-sqs/internal/admin"
 	"github.com/openjobspec/ojs-backend-sqs/internal/api"
@@ -60,6 +62,10 @@ func NewRouterWithRealtime(backend core.Backend, logger *slog.Logger, cfg Config
 	workflowHandler := api.NewWorkflowHandler(backend)
 	batchHandler := api.NewBatchHandler(backend)
 	adminHandler := api.NewAdminHandler(backend)
+
+	// Enable schema validation via in-memory registry
+	schemaReg := commoncore.NewMemorySchemaRegistry()
+	jobHandler.SetSchemaRegistry(schemaReg)
 
 	// Wire event publisher into handlers
 	if publisher != nil {
@@ -116,6 +122,18 @@ func NewRouterWithRealtime(backend core.Backend, logger *slog.Logger, cfg Config
 	r.Post("/ojs/v1/workflows", workflowHandler.Create)
 	r.Get("/ojs/v1/workflows/{id}", workflowHandler.Get)
 	r.Delete("/ojs/v1/workflows/{id}", workflowHandler.Cancel)
+
+	// Schema registry API
+	schemaRegistry := registry.NewSchemaRegistry()
+	schemaHandler := registry.NewSchemaHandler(schemaRegistry)
+	r.Post("/ojs/v1/schemas", schemaHandler.HandleRegister)
+	r.Get("/ojs/v1/schemas/{jobType}", schemaHandler.HandleGetLatest)
+	r.Get("/ojs/v1/schemas/{jobType}/versions", schemaHandler.HandleListVersions)
+	r.Get("/ojs/v1/schemas/{jobType}/versions/{version}", schemaHandler.HandleGetVersion)
+	r.Post("/ojs/v1/schemas/{jobType}/validate", schemaHandler.HandleValidate)
+	r.Put("/ojs/v1/schemas/{jobType}/compatibility", schemaHandler.HandleSetCompatibility)
+	r.Delete("/ojs/v1/schemas/{jobType}", schemaHandler.HandleDelete)
+	r.Delete("/ojs/v1/schemas/{jobType}/versions/{version}", schemaHandler.HandleDelete)
 
 	// Admin API endpoints
 	r.Get("/ojs/v1/admin/stats", adminHandler.Stats)

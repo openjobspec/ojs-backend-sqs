@@ -329,7 +329,7 @@ func (b *SQSBackend) Ack(ctx context.Context, jobID string, result []byte) (*cor
 
 	return &core.AckResponse{
 		Acknowledged: true,
-		JobID:        jobID,
+		ID:        jobID,
 		State:        core.StateCompleted,
 		CompletedAt:  now,
 		Job:          job,
@@ -394,7 +394,7 @@ func (b *SQSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobErr
 			return nil, fmt.Errorf("fetch requeued job: %w", err)
 		}
 		return &core.NackResponse{
-			JobID:       jobID,
+			ID:       jobID,
 			State:       core.StateAvailable,
 			Attempt:     attempt,
 			MaxAttempts: maxAttempts,
@@ -528,7 +528,7 @@ func (b *SQSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobErr
 			return nil, fmt.Errorf("fetch discarded job: %w", err)
 		}
 		return &core.NackResponse{
-			JobID:       jobID,
+			ID:       jobID,
 			State:       core.StateDiscarded,
 			Attempt:     newAttempt,
 			MaxAttempts: maxAttempts,
@@ -581,7 +581,7 @@ func (b *SQSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobErr
 		return nil, fmt.Errorf("fetch retryable job: %w", err)
 	}
 	return &core.NackResponse{
-		JobID:         jobID,
+		ID:         jobID,
 		State:         core.StateRetryable,
 		Attempt:       newAttempt,
 		MaxAttempts:   maxAttempts,
