@@ -4,7 +4,7 @@ Thank you for your interest in contributing to the SQS backend for Open Job Spec
 
 ## Prerequisites
 
-- Go 1.22+
+- Go 1.24+
 - Docker (for LocalStack and Redis)
 - AWS CLI (optional, for manual testing)
 
