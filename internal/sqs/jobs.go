@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -229,10 +230,12 @@ func (b *SQSBackend) Fetch(ctx context.Context, queues []string, count int, work
 						// Discard expired job
 						b.store.UpdateJobState(ctx, job.ID, core.StateDiscarded, map[string]any{})
 						// Delete from SQS
-						b.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+						if _, delErr := b.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 							QueueUrl:      aws.String(queueURL),
 							ReceiptHandle: msg.ReceiptHandle,
-						})
+						}); delErr != nil {
+							slog.Warn("failed to delete expired job from SQS", "job_id", job.ID, "error", delErr)
+						}
 						continue
 					}
 				}
@@ -297,10 +300,12 @@ func (b *SQSBackend) Ack(ctx context.Context, jobID string, result []byte) (*cor
 	if record.SQSReceiptHandle != "" {
 		queueURL, err := b.getOrCreateQueueURL(ctx, record.Queue)
 		if err == nil {
-			b.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+			if _, delErr := b.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 				QueueUrl:      aws.String(queueURL),
 				ReceiptHandle: aws.String(record.SQSReceiptHandle),
-			})
+			}); delErr != nil {
+				slog.Warn("failed to delete acked job from SQS", "job_id", jobID, "error", delErr)
+			}
 		}
 	}
 
@@ -624,10 +629,12 @@ func (b *SQSBackend) Cancel(ctx context.Context, jobID string) (*core.Job, error
 	if record.SQSReceiptHandle != "" {
 		queueURL, err := b.getOrCreateQueueURL(ctx, record.Queue)
 		if err == nil {
-			b.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+			if _, delErr := b.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 				QueueUrl:      aws.String(queueURL),
 				ReceiptHandle: aws.String(record.SQSReceiptHandle),
-			})
+			}); delErr != nil {
+				slog.Warn("failed to delete cancelled job from SQS", "job_id", jobID, "error", delErr)
+			}
 		}
 	}
 
