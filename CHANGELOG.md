@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-20
+
 ### Added
 - Initial SQS-backed OpenJobSpec server with DynamoDB state store.
 - AWS LocalStack support for local development.
