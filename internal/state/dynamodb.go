@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,9 @@ import (
 //   - Workflow results: PK=workflowID, SK="RESULT#<stepIdx>"
 //   - Cron instances: PK="CRON_INSTANCE#<name>", SK="INSTANCE"
 //   - Cron locks: PK="CRON_LOCK#<name>#<timestamp>", SK="LOCK"
+//   - Delivery outbox: PK="DELIVERY#<jobID>#<generation>", SK="DELIVERY_OUTBOX"
+//   - Durable job effects: PK="EFFECT#<effectID>", SK="JOB_EFFECT"
+//   - Workflow advances: PK="WORKFLOW_ADVANCE#<workflowID>#<jobID>", SK="WORKFLOW_ADVANCE"
 //
 // GSI1: GSI1PK (QUEUE#<name>) + GSI1SK (STATE#<state>#<created_at>)
 // GSI2: GSI2PK (STATE#<state>) + GSI2SK (<created_at>)
@@ -36,6 +40,7 @@ import (
 type DynamoDBStore struct {
 	client    *dynamodb.Client
 	tableName string
+	pageLimit int32
 }
 
 // NewDynamoDBStore creates a new DynamoDB store.
@@ -124,10 +129,10 @@ func (s *DynamoDBStore) EnsureTable(ctx context.Context) error {
 
 	// Wait for table to be active
 	waiter := dynamodb.NewTableExistsWaiter(s.client)
-	if err := waiter.Wait(ctx, &dynamodb.DescribeTableInput{
+	if waitErr := waiter.Wait(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(s.tableName),
-	}, 2*time.Minute); err != nil {
-		return fmt.Errorf("failed waiting for table: %w", err)
+	}, 2*time.Minute); waitErr != nil {
+		return fmt.Errorf("failed waiting for table: %w", waitErr)
 	}
 
 	// Enable TTL
@@ -171,6 +176,7 @@ func (s *DynamoDBStore) GetJob(ctx context.Context, jobID string) (*JobRecord, e
 			"PK": &types.AttributeValueMemberS{Value: jobID},
 			"SK": &types.AttributeValueMemberS{Value: "JOB"},
 		},
+		ConsistentRead: aws.Bool(true),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get job: %w", err)
@@ -182,10 +188,22 @@ func (s *DynamoDBStore) GetJob(ctx context.Context, jobID string) (*JobRecord, e
 
 	var record JobRecord
 	if err := attributevalue.UnmarshalMap(result.Item, &record); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal job: %w", err)
+		return nil, fmt.Errorf("%w: failed to unmarshal job: %w", ErrCorruptItem, err)
 	}
 
 	return &record, nil
+}
+
+// isManagedStateAttribute reports whether an update key is already assigned by
+// UpdateJobState itself (the job state and its GSI projections) and must not be
+// re-added from the caller's updates map.
+func isManagedStateAttribute(key string) bool {
+	switch key {
+	case "state", "GSI1SK", "GSI2PK":
+		return true
+	default:
+		return false
+	}
 }
 
 // UpdateJobState updates a job's state and additional fields.
@@ -198,8 +216,14 @@ func (s *DynamoDBStore) UpdateJobState(ctx context.Context, jobID, newState stri
 		":state": &types.AttributeValueMemberS{Value: newState},
 	}
 
-	// Apply additional updates
+	// Apply additional updates. The "state" attribute is already assigned above
+	// from newState, and the GSI projection attributes are managed below, so skip
+	// those keys to avoid emitting two assignments for the same DynamoDB path
+	// (which fails with a ValidationException).
 	for key, value := range updates {
+		if isManagedStateAttribute(key) {
+			continue
+		}
 		placeholder := fmt.Sprintf(":val%d", len(exprAttrValues))
 		attrName := fmt.Sprintf("#attr%d", len(exprAttrNames))
 		updateExpr += fmt.Sprintf(", %s = %s", attrName, placeholder)
@@ -271,66 +295,56 @@ func (s *DynamoDBStore) ListJobsByQueue(ctx context.Context, queue, state string
 			":pk": &types.AttributeValueMemberS{Value: gsi1pk},
 			":sk": &types.AttributeValueMemberS{Value: gsi1skPrefix},
 		},
-		Limit: aws.Int32(int32(limit)),
+	}
+	if s.pageLimit > 0 && (limit <= 0 || s.pageLimit < int32(limit)) {
+		queryInput.Limit = aws.Int32(s.pageLimit)
+	} else if limit > 0 {
+		queryInput.Limit = aws.Int32(int32(limit))
 	}
 
-	result, err := s.client.Query(ctx, queryInput)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query jobs by queue: %w", err)
-	}
-
-	jobs := make([]*JobRecord, 0, len(result.Items))
-	for _, item := range result.Items {
-		var job JobRecord
-		if err := attributevalue.UnmarshalMap(item, &job); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal job: %w", err)
+	jobs := make([]*JobRecord, 0)
+	for {
+		result, err := s.client.Query(ctx, queryInput)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query jobs by queue: %w", err)
 		}
-		jobs = append(jobs, &job)
+		for _, item := range result.Items {
+			var job JobRecord
+			if err := attributevalue.UnmarshalMap(item, &job); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal job: %w", err)
+			}
+			jobs = append(jobs, &job)
+			if limit > 0 && len(jobs) >= limit {
+				return jobs, nil
+			}
+		}
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		queryInput.ExclusiveStartKey = result.LastEvaluatedKey
 	}
-
 	return jobs, nil
 }
 
 // ListJobsByState returns jobs with a specific state (paginated).
 func (s *DynamoDBStore) ListJobsByState(ctx context.Context, state string, limit, offset int) ([]*JobRecord, int, error) {
 	gsi2pk := fmt.Sprintf("STATE#%s", state)
-
-	// First, get total count
-	countInput := &dynamodb.QueryInput{
+	baseInput := &dynamodb.QueryInput{
 		TableName:              aws.String(s.tableName),
 		IndexName:              aws.String("GSI2"),
 		KeyConditionExpression: aws.String("GSI2PK = :pk"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":pk": &types.AttributeValueMemberS{Value: gsi2pk},
 		},
-		Select: types.SelectCount,
 	}
-
-	countResult, err := s.client.Query(ctx, countInput)
+	total, err := s.countQueryPages(ctx, baseInput)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to count jobs by state: %w", err)
 	}
-
-	total := int(countResult.Count)
-
-	// Now get the actual items with pagination
-	queryInput := &dynamodb.QueryInput{
-		TableName:              aws.String(s.tableName),
-		IndexName:              aws.String("GSI2"),
-		KeyConditionExpression: aws.String("GSI2PK = :pk"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": &types.AttributeValueMemberS{Value: gsi2pk},
-		},
-		Limit: aws.Int32(int32(limit + offset)),
-	}
-
-	result, err := s.client.Query(ctx, queryInput)
+	items, err := s.queryStateWindow(ctx, baseInput, limit+offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query jobs by state: %w", err)
 	}
-
-	// Apply offset manually (DynamoDB doesn't support offset directly)
-	items := result.Items
 	if offset >= len(items) {
 		return []*JobRecord{}, total, nil
 	}
@@ -352,12 +366,53 @@ func (s *DynamoDBStore) ListJobsByState(ctx context.Context, state string, limit
 	return jobs, total, nil
 }
 
+func (s *DynamoDBStore) countQueryPages(ctx context.Context, base *dynamodb.QueryInput) (int, error) {
+	input := *base
+	input.Select = types.SelectCount
+	if s.pageLimit > 0 {
+		input.Limit = aws.Int32(s.pageLimit)
+	}
+	total := 0
+	for {
+		result, err := s.client.Query(ctx, &input)
+		if err != nil {
+			return 0, err
+		}
+		total += int(result.Count)
+		if len(result.LastEvaluatedKey) == 0 {
+			return total, nil
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
+	}
+}
+
+func (s *DynamoDBStore) queryStateWindow(ctx context.Context, base *dynamodb.QueryInput, target int) ([]map[string]types.AttributeValue, error) {
+	input := *base
+	if s.pageLimit > 0 && (target <= 0 || s.pageLimit < int32(target)) {
+		input.Limit = aws.Int32(s.pageLimit)
+	} else if target > 0 {
+		input.Limit = aws.Int32(int32(target))
+	}
+	var items []map[string]types.AttributeValue
+	for {
+		result, err := s.client.Query(ctx, &input)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, result.Items...)
+		if (target > 0 && len(items) >= target) || len(result.LastEvaluatedKey) == 0 {
+			return items, nil
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
+	}
+}
+
 // CountJobsByQueueAndState counts jobs in a queue with a specific state.
 func (s *DynamoDBStore) CountJobsByQueueAndState(ctx context.Context, queue, state string) (int, error) {
 	gsi1pk := fmt.Sprintf("QUEUE#%s", queue)
 	gsi1skPrefix := fmt.Sprintf("STATE#%s#", state)
 
-	result, err := s.client.Query(ctx, &dynamodb.QueryInput{
+	input := &dynamodb.QueryInput{
 		TableName:              aws.String(s.tableName),
 		IndexName:              aws.String("GSI1"),
 		KeyConditionExpression: aws.String("GSI1PK = :pk AND begins_with(GSI1SK, :sk)"),
@@ -366,12 +421,24 @@ func (s *DynamoDBStore) CountJobsByQueueAndState(ctx context.Context, queue, sta
 			":sk": &types.AttributeValueMemberS{Value: gsi1skPrefix},
 		},
 		Select: types.SelectCount,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("failed to count jobs: %w", err)
+	}
+	if s.pageLimit > 0 {
+		input.Limit = aws.Int32(s.pageLimit)
 	}
 
-	return int(result.Count), nil
+	total := 0
+	for {
+		result, err := s.client.Query(ctx, input)
+		if err != nil {
+			return 0, fmt.Errorf("failed to count jobs: %w", err)
+		}
+		total += int(result.Count)
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
+	}
+	return total, nil
 }
 
 // RegisterQueue creates a queue metadata record.
@@ -402,27 +469,36 @@ func (s *DynamoDBStore) RegisterQueue(ctx context.Context, name string) error {
 
 // ListQueues returns all registered queue names.
 func (s *DynamoDBStore) ListQueues(ctx context.Context) ([]string, error) {
-	result, err := s.client.Scan(ctx, &dynamodb.ScanInput{
+	input := &dynamodb.ScanInput{
 		TableName:        aws.String(s.tableName),
 		FilterExpression: aws.String("begins_with(PK, :prefix) AND SK = :sk"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":prefix": &types.AttributeValueMemberS{Value: "QUEUE#"},
 			":sk":     &types.AttributeValueMemberS{Value: "META"},
 		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list queues: %w", err)
+	}
+	if s.pageLimit > 0 {
+		input.Limit = aws.Int32(s.pageLimit)
 	}
 
-	queues := make([]string, 0, len(result.Items))
-	for _, item := range result.Items {
-		if nameAttr, ok := item["name"]; ok {
-			if nameVal, ok := nameAttr.(*types.AttributeValueMemberS); ok {
-				queues = append(queues, nameVal.Value)
+	var queues []string
+	for {
+		result, err := s.client.Scan(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list queues: %w", err)
+		}
+		for _, item := range result.Items {
+			if nameAttr, ok := item["name"]; ok {
+				if nameVal, ok := nameAttr.(*types.AttributeValueMemberS); ok {
+					queues = append(queues, nameVal.Value)
+				}
 			}
 		}
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
 	}
-
 	return queues, nil
 }
 
@@ -708,27 +784,36 @@ func (s *DynamoDBStore) AddWorkflowJob(ctx context.Context, workflowID, jobID st
 
 // GetWorkflowJobs returns all job IDs for a workflow.
 func (s *DynamoDBStore) GetWorkflowJobs(ctx context.Context, workflowID string) ([]string, error) {
-	result, err := s.client.Query(ctx, &dynamodb.QueryInput{
+	input := &dynamodb.QueryInput{
 		TableName:              aws.String(s.tableName),
 		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":pk": &types.AttributeValueMemberS{Value: workflowID},
 			":sk": &types.AttributeValueMemberS{Value: "JOB#"},
 		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get workflow jobs: %w", err)
+	}
+	if s.pageLimit > 0 {
+		input.Limit = aws.Int32(s.pageLimit)
 	}
 
-	jobIDs := make([]string, 0, len(result.Items))
-	for _, item := range result.Items {
-		if jobIDAttr, ok := item["job_id"]; ok {
-			if jobIDVal, ok := jobIDAttr.(*types.AttributeValueMemberS); ok {
-				jobIDs = append(jobIDs, jobIDVal.Value)
+	var jobIDs []string
+	for {
+		result, err := s.client.Query(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get workflow jobs: %w", err)
+		}
+		for _, item := range result.Items {
+			if jobIDAttr, ok := item["job_id"]; ok {
+				if jobIDVal, ok := jobIDAttr.(*types.AttributeValueMemberS); ok {
+					jobIDs = append(jobIDs, jobIDVal.Value)
+				}
 			}
 		}
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
 	}
-
 	return jobIDs, nil
 }
 
@@ -754,42 +839,48 @@ func (s *DynamoDBStore) SetWorkflowResult(ctx context.Context, workflowID string
 
 // GetWorkflowResults retrieves all step results for a workflow.
 func (s *DynamoDBStore) GetWorkflowResults(ctx context.Context, workflowID string) (map[int]string, error) {
-	result, err := s.client.Query(ctx, &dynamodb.QueryInput{
+	input := &dynamodb.QueryInput{
 		TableName:              aws.String(s.tableName),
 		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":pk": &types.AttributeValueMemberS{Value: workflowID},
 			":sk": &types.AttributeValueMemberS{Value: "RESULT#"},
 		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get workflow results: %w", err)
 	}
-
+	if s.pageLimit > 0 {
+		input.Limit = aws.Int32(s.pageLimit)
+	}
 	results := make(map[int]string)
-	for _, item := range result.Items {
-		var stepIdx int
-		var resultStr string
+	for {
+		result, err := s.client.Query(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get workflow results: %w", err)
+		}
+		for _, item := range result.Items {
+			var stepIdx int
+			var resultStr string
 
-		if idxAttr, ok := item["step_idx"]; ok {
-			if idxVal, ok := idxAttr.(*types.AttributeValueMemberN); ok {
-				n, err := strconv.Atoi(idxVal.Value)
-				if err != nil {
-					slog.Warn("dynamodb: invalid step_idx value", "value", idxVal.Value, "error", err)
+			if idxAttr, ok := item["step_idx"]; ok {
+				if idxVal, ok := idxAttr.(*types.AttributeValueMemberN); ok {
+					n, err := strconv.Atoi(idxVal.Value)
+					if err != nil {
+						slog.Warn("dynamodb: invalid step_idx value", "value", idxVal.Value, "error", err)
+					}
+					stepIdx = n
 				}
-				stepIdx = n
 			}
-		}
-
-		if resultAttr, ok := item["result"]; ok {
-			if resultVal, ok := resultAttr.(*types.AttributeValueMemberS); ok {
-				resultStr = resultVal.Value
+			if resultAttr, ok := item["result"]; ok {
+				if resultVal, ok := resultAttr.(*types.AttributeValueMemberS); ok {
+					resultStr = resultVal.Value
+				}
 			}
+			results[stepIdx] = resultStr
 		}
-
-		results[stepIdx] = resultStr
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
 	}
-
 	return results, nil
 }
 
@@ -861,27 +952,36 @@ func (s *DynamoDBStore) DeleteCron(ctx context.Context, name string) error {
 
 // ListCrons returns all cron records.
 func (s *DynamoDBStore) ListCrons(ctx context.Context) ([]*CronRecord, error) {
-	result, err := s.client.Scan(ctx, &dynamodb.ScanInput{
+	input := &dynamodb.ScanInput{
 		TableName:        aws.String(s.tableName),
 		FilterExpression: aws.String("begins_with(PK, :prefix) AND SK = :sk"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":prefix": &types.AttributeValueMemberS{Value: "CRON#"},
 			":sk":     &types.AttributeValueMemberS{Value: "CRON"},
 		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list crons: %w", err)
+	}
+	if s.pageLimit > 0 {
+		input.Limit = aws.Int32(s.pageLimit)
 	}
 
-	crons := make([]*CronRecord, 0, len(result.Items))
-	for _, item := range result.Items {
-		var cron CronRecord
-		if err := attributevalue.UnmarshalMap(item, &cron); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal cron: %w", err)
+	var crons []*CronRecord
+	for {
+		result, err := s.client.Scan(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list crons: %w", err)
 		}
-		crons = append(crons, &cron)
+		for _, item := range result.Items {
+			var cron CronRecord
+			if err := attributevalue.UnmarshalMap(item, &cron); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal cron: %w", err)
+			}
+			crons = append(crons, &cron)
+		}
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
 	}
-
 	return crons, nil
 }
 
@@ -956,25 +1056,44 @@ func (s *DynamoDBStore) SetCronInstance(ctx context.Context, name, jobID string)
 	return nil
 }
 
-// PutWorker stores worker metadata.
+// PutWorker updates worker heartbeat metadata without replacing directives or
+// metadata written by administrative/control-plane callers.
 func (s *DynamoDBStore) PutWorker(ctx context.Context, workerID string, data map[string]string) error {
 	pk := fmt.Sprintf("WORKER#%s", workerID)
 
-	item := map[string]types.AttributeValue{
-		"PK": &types.AttributeValueMemberS{Value: pk},
-		"SK": &types.AttributeValueMemberS{Value: "WORKER"},
+	if len(data) == 0 {
+		return nil
 	}
 
-	for key, value := range data {
-		item[key] = &types.AttributeValueMemberS{Value: value}
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	setParts := make([]string, 0, len(keys))
+	names := make(map[string]string, len(keys))
+	values := make(map[string]types.AttributeValue, len(keys))
+	for i, key := range keys {
+		name := fmt.Sprintf("#field%d", i)
+		value := fmt.Sprintf(":value%d", i)
+		setParts = append(setParts, name+" = "+value)
+		names[name] = key
+		values[value] = &types.AttributeValueMemberS{Value: data[key]}
 	}
 
-	_, err := s.client.PutItem(ctx, &dynamodb.PutItemInput{
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.tableName),
-		Item:      item,
+		Key: map[string]types.AttributeValue{
+			"PK": &types.AttributeValueMemberS{Value: pk},
+			"SK": &types.AttributeValueMemberS{Value: "WORKER"},
+		},
+		UpdateExpression:          aws.String("SET " + strings.Join(setParts, ", ")),
+		ExpressionAttributeNames:  names,
+		ExpressionAttributeValues: values,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to put worker: %w", err)
+		return fmt.Errorf("failed to update worker: %w", err)
 	}
 
 	return nil
@@ -1119,28 +1238,10 @@ func (s *DynamoDBStore) GetDueScheduledJobs(ctx context.Context, nowMs int64) ([
 	}
 
 	// Compatibility fallback for tables without GSI3.
-	result, err := s.client.Scan(ctx, &dynamodb.ScanInput{
-		TableName:        aws.String(s.tableName),
-		FilterExpression: aws.String("begins_with(PK, :prefix) AND SK = :sk AND scheduled_at_ms <= :now"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":prefix": &types.AttributeValueMemberS{Value: "SCHEDULED#"},
-			":sk":     &types.AttributeValueMemberS{Value: "SCHEDULED"},
-			":now":    &types.AttributeValueMemberN{Value: strconv.FormatInt(nowMs, 10)},
-		},
-	})
+	jobIDs, err = s.scanDueJobs(ctx, "SCHEDULED#", "SCHEDULED", "scheduled_at_ms", nowMs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get due scheduled jobs: %w", err)
 	}
-
-	jobIDs = make([]string, 0, len(result.Items))
-	for _, item := range result.Items {
-		if jobIDAttr, ok := item["job_id"]; ok {
-			if jobIDVal, ok := jobIDAttr.(*types.AttributeValueMemberS); ok {
-				jobIDs = append(jobIDs, jobIDVal.Value)
-			}
-		}
-	}
-
 	return jobIDs, nil
 }
 
@@ -1195,33 +1296,15 @@ func (s *DynamoDBStore) GetDueRetryJobs(ctx context.Context, nowMs int64) ([]str
 	}
 
 	// Compatibility fallback for tables without GSI3.
-	result, err := s.client.Scan(ctx, &dynamodb.ScanInput{
-		TableName:        aws.String(s.tableName),
-		FilterExpression: aws.String("begins_with(PK, :prefix) AND SK = :sk AND retry_at_ms <= :now"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":prefix": &types.AttributeValueMemberS{Value: "RETRY#"},
-			":sk":     &types.AttributeValueMemberS{Value: "RETRY"},
-			":now":    &types.AttributeValueMemberN{Value: strconv.FormatInt(nowMs, 10)},
-		},
-	})
+	jobIDs, err = s.scanDueJobs(ctx, "RETRY#", "RETRY", "retry_at_ms", nowMs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get due retry jobs: %w", err)
 	}
-
-	jobIDs = make([]string, 0, len(result.Items))
-	for _, item := range result.Items {
-		if jobIDAttr, ok := item["job_id"]; ok {
-			if jobIDVal, ok := jobIDAttr.(*types.AttributeValueMemberS); ok {
-				jobIDs = append(jobIDs, jobIDVal.Value)
-			}
-		}
-	}
-
 	return jobIDs, nil
 }
 
 func (s *DynamoDBStore) queryDueJobs(ctx context.Context, dueType string, nowMs int64) ([]string, error) {
-	result, err := s.client.Query(ctx, &dynamodb.QueryInput{
+	input := &dynamodb.QueryInput{
 		TableName:              aws.String(s.tableName),
 		IndexName:              aws.String("GSI3"),
 		KeyConditionExpression: aws.String("GSI3PK = :pk AND GSI3SK <= :now"),
@@ -1229,20 +1312,65 @@ func (s *DynamoDBStore) queryDueJobs(ctx context.Context, dueType string, nowMs 
 			":pk":  &types.AttributeValueMemberS{Value: dueType},
 			":now": &types.AttributeValueMemberN{Value: strconv.FormatInt(nowMs, 10)},
 		},
-	})
-	if err != nil {
-		return nil, err
+	}
+	if s.pageLimit > 0 {
+		input.Limit = aws.Int32(s.pageLimit)
 	}
 
-	jobIDs := make([]string, 0, len(result.Items))
-	for _, item := range result.Items {
-		if jobIDAttr, ok := item["job_id"]; ok {
-			if jobIDVal, ok := jobIDAttr.(*types.AttributeValueMemberS); ok {
-				jobIDs = append(jobIDs, jobIDVal.Value)
+	var jobIDs []string
+	for {
+		result, err := s.client.Query(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range result.Items {
+			if jobIDAttr, ok := item["job_id"]; ok {
+				if jobIDVal, ok := jobIDAttr.(*types.AttributeValueMemberS); ok {
+					jobIDs = append(jobIDs, jobIDVal.Value)
+				}
 			}
 		}
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
+	}
+	return jobIDs, nil
+}
+
+func (s *DynamoDBStore) scanDueJobs(ctx context.Context, prefix, sk, dueAttribute string, nowMs int64) ([]string, error) {
+	input := &dynamodb.ScanInput{
+		TableName:        aws.String(s.tableName),
+		FilterExpression: aws.String("begins_with(PK, :prefix) AND SK = :sk AND #due <= :now"),
+		ExpressionAttributeNames: map[string]string{
+			"#due": dueAttribute,
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":prefix": &types.AttributeValueMemberS{Value: prefix},
+			":sk":     &types.AttributeValueMemberS{Value: sk},
+			":now":    &types.AttributeValueMemberN{Value: strconv.FormatInt(nowMs, 10)},
+		},
+	}
+	if s.pageLimit > 0 {
+		input.Limit = aws.Int32(s.pageLimit)
 	}
 
+	var jobIDs []string
+	for {
+		result, err := s.client.Scan(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range result.Items {
+			if jobID, ok := item["job_id"].(*types.AttributeValueMemberS); ok {
+				jobIDs = append(jobIDs, jobID.Value)
+			}
+		}
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		input.ExclusiveStartKey = result.LastEvaluatedKey
+	}
 	return jobIDs, nil
 }
 

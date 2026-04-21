@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -25,15 +24,7 @@ func newTestDynamoStore(t *testing.T, h http.HandlerFunc) *DynamoDBStore {
 		context.Background(),
 		config.WithRegion("us-east-1"),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "test")),
-		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
-			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-				return aws.Endpoint{
-					URL:               server.URL,
-					HostnameImmutable: true,
-					PartitionID:       "aws",
-				}, nil
-			},
-		)),
+		config.WithBaseEndpoint(server.URL),
 	)
 	if err != nil {
 		t.Fatalf("load aws config: %v", err)

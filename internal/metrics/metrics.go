@@ -73,6 +73,14 @@ var (
 		Buckets:   prometheus.DefBuckets,
 	})
 
+	// FetchPartialFailures counts fetch failures hidden from transports because
+	// the same request had already claimed jobs that must still be delivered.
+	FetchPartialFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "ojs",
+		Name:      "fetch_partial_failures_total",
+		Help:      "Total fetch failures suppressed to preserve already claimed jobs.",
+	}, []string{"stage"})
+
 	// QueueDepth tracks the number of jobs waiting in each queue.
 	QueueDepth = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "ojs",

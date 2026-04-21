@@ -19,7 +19,7 @@ import (
 
 // SQSBackend implements core.Backend using AWS SQS + DynamoDB state store.
 type SQSBackend struct {
-	sqsClient   *sqs.Client
+	sqsClient   sqsAPI
 	store       state.Store
 	queueURLs   map[string]string // cache: OJS queue name -> SQS queue URL
 	queueURLsMu sync.RWMutex
@@ -30,8 +30,24 @@ type SQSBackend struct {
 	cpStore     *checkpointStore
 }
 
+type sqsAPI interface {
+	ListQueues(context.Context, *sqs.ListQueuesInput, ...func(*sqs.Options)) (*sqs.ListQueuesOutput, error)
+	CreateQueue(context.Context, *sqs.CreateQueueInput, ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error)
+	GetQueueUrl(context.Context, *sqs.GetQueueUrlInput, ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error)
+	SetQueueAttributes(context.Context, *sqs.SetQueueAttributesInput, ...func(*sqs.Options)) (*sqs.SetQueueAttributesOutput, error)
+	SendMessage(context.Context, *sqs.SendMessageInput, ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
+	SendMessageBatch(context.Context, *sqs.SendMessageBatchInput, ...func(*sqs.Options)) (*sqs.SendMessageBatchOutput, error)
+	ReceiveMessage(context.Context, *sqs.ReceiveMessageInput, ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
+	DeleteMessage(context.Context, *sqs.DeleteMessageInput, ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
+	ChangeMessageVisibility(context.Context, *sqs.ChangeMessageVisibilityInput, ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
+}
+
 // New creates a new SQSBackend.
 func New(sqsClient *sqs.Client, store state.Store, queuePrefix string, useFIFO bool) *SQSBackend {
+	return newWithSQSClient(sqsClient, store, queuePrefix, useFIFO)
+}
+
+func newWithSQSClient(sqsClient sqsAPI, store state.Store, queuePrefix string, useFIFO bool) *SQSBackend {
 	return &SQSBackend{
 		sqsClient:   sqsClient,
 		store:       store,

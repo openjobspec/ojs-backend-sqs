@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -304,8 +305,8 @@ func TestInfo_NotFound(t *testing.T) {
 		t.Fatal("expected error for nonexistent job")
 	}
 
-	ojsErr, ok := err.(*core.OJSError)
-	if !ok {
+	var ojsErr *core.OJSError
+	if !errors.As(err, &ojsErr) {
 		t.Fatalf("expected OJSError, got %T", err)
 	}
 	if ojsErr.Code != core.ErrCodeNotFound {
@@ -324,8 +325,8 @@ func TestCancel_NotFound(t *testing.T) {
 		t.Fatal("expected error")
 	}
 
-	ojsErr, ok := err.(*core.OJSError)
-	if !ok {
+	var ojsErr *core.OJSError
+	if !errors.As(err, &ojsErr) {
 		t.Fatalf("expected OJSError, got %T", err)
 	}
 	if ojsErr.Code != core.ErrCodeNotFound {
@@ -344,8 +345,8 @@ func TestAck_NotFound(t *testing.T) {
 		t.Fatal("expected error")
 	}
 
-	ojsErr, ok := err.(*core.OJSError)
-	if !ok {
+	var ojsErr *core.OJSError
+	if !errors.As(err, &ojsErr) {
 		t.Fatalf("expected OJSError, got %T", err)
 	}
 	if ojsErr.Code != core.ErrCodeNotFound {
@@ -364,8 +365,8 @@ func TestNack_NotFound(t *testing.T) {
 		t.Fatal("expected error")
 	}
 
-	ojsErr, ok := err.(*core.OJSError)
-	if !ok {
+	var ojsErr *core.OJSError
+	if !errors.As(err, &ojsErr) {
 		t.Fatalf("expected OJSError, got %T", err)
 	}
 	if ojsErr.Code != core.ErrCodeNotFound {
@@ -387,4 +388,3 @@ func TestPushBatch_EmptyList(t *testing.T) {
 		t.Errorf("expected empty result, got %d jobs", len(jobs))
 	}
 }
-

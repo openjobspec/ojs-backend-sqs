@@ -31,9 +31,14 @@ func TestExtendVisibility_CalculatesTimeoutSeconds(t *testing.T) {
 			expectedSeconds: 30,
 		},
 		{
-			name:            "very small positive defaults to 30",
+			name:            "very small positive rounds up to one",
 			visTimeoutMs:    500,
-			expectedSeconds: 30,
+			expectedSeconds: 1,
+		},
+		{
+			name:            "fractional second rounds up",
+			visTimeoutMs:    1001,
+			expectedSeconds: 2,
 		},
 		{
 			name:            "maximum capped at 43200",
@@ -54,14 +59,8 @@ func TestExtendVisibility_CalculatesTimeoutSeconds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Test the timeout calculation logic directly
-			timeoutSec := int32(tt.visTimeoutMs / 1000)
-			if timeoutSec < 1 {
-				timeoutSec = 30
-			}
-			if timeoutSec > 43200 {
-				timeoutSec = 43200
-			}
+			// Exercise the real clamping helper used by extendVisibility/heartbeat.
+			timeoutSec := clampVisibilityTimeoutSeconds(tt.visTimeoutMs)
 
 			if timeoutSec != tt.expectedSeconds {
 				t.Errorf("timeout = %d seconds, want %d", timeoutSec, tt.expectedSeconds)
