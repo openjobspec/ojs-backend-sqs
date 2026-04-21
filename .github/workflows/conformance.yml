@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  GOWORK: "off"
+  GOFLAGS: "-mod=readonly"
+
+permissions:
+  contents: write
+
 jobs:
   conformance:
     runs-on: ubuntu-latest
@@ -43,19 +50,23 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
-          repository: openjobspec/openjobspec
-          path: openjobspec
+          path: ojs-backend-sqs
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          repository: openjobspec/ojs-conformance
+          path: ojs-conformance
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
-          go-version: "1.24.13"
+          go-version-file: ojs-backend-sqs/go.mod
 
       - name: Build conformance runner
-        working-directory: openjobspec/ojs-conformance
+        working-directory: ojs-conformance
         run: go build -o bin/ojs-conformance ./runner/http/
 
       - name: Build and start OJS server
-        working-directory: openjobspec/ojs-backend-sqs
+        working-directory: ojs-backend-sqs
         run: |
           go build -o bin/ojs-server ./cmd/ojs-server
           OJS_ALLOW_INSECURE_NO_AUTH=true OJS_PORT=8080 ./bin/ojs-server &
@@ -63,7 +74,7 @@ jobs:
 
       - name: Wait for server
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -s http://localhost:8080/ojs/v1/health | grep -q ok; then
               echo "Server is ready"
               exit 0
@@ -77,9 +88,9 @@ jobs:
         id: conformance
         run: |
           set +e
-          OUTPUT=$(openjobspec/ojs-conformance/bin/ojs-conformance \
+          OUTPUT=$(ojs-conformance/bin/ojs-conformance \
             -url http://localhost:8080 \
-            -suites openjobspec/ojs-conformance/suites \
+            -suites ojs-conformance/suites \
             -redis redis://localhost:6379 2>&1)
           EXIT_CODE=$?
           echo "$OUTPUT"
@@ -108,16 +119,16 @@ jobs:
             COLOR="brightgreen"
             LABEL="Level%20${LEVEL}"
           fi
-          mkdir -p openjobspec/ojs-backend-sqs/.github/badges
+          mkdir -p ojs-backend-sqs/.github/badges
           curl -s "https://img.shields.io/badge/OJS%20Conformance-${LABEL}-${COLOR}" \
-            -o openjobspec/ojs-backend-sqs/.github/badges/conformance.svg
+            -o ojs-backend-sqs/.github/badges/conformance.svg
 
       - name: Commit badge
         if: github.ref == 'refs/heads/main' && always()
-        working-directory: openjobspec/ojs-backend-sqs
+        working-directory: ojs-backend-sqs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .github/badges/conformance.svg 2>/dev/null || true
+          git add .github/badges/conformance.svg
           git diff --cached --quiet || git commit -m "chore: update conformance badge [skip ci]"
-          git push || true
+          git push
