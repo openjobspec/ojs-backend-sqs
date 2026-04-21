@@ -176,17 +176,18 @@ func TestValidateContentType_ErrorFormat(t *testing.T) {
 	}
 }
 
-func TestStatusCapture_CapturesWriteHeader(t *testing.T) {
+func TestRequestLogger_PreservesFlusher(t *testing.T) {
+	logger := newTestLogger()
+	handler := RequestLogger(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, ok := w.(http.Flusher); !ok {
+			t.Fatal("request logger removed http.Flusher")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
 	w := httptest.NewRecorder()
-	sc := &statusCapture{ResponseWriter: w, code: http.StatusOK}
-
-	sc.WriteHeader(http.StatusNotFound)
-
-	if sc.code != http.StatusNotFound {
-		t.Errorf("captured code = %d, want %d", sc.code, http.StatusNotFound)
-	}
-	if w.Code != http.StatusNotFound {
-		t.Errorf("underlying code = %d, want %d", w.Code, http.StatusNotFound)
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/events", nil))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
 	}
 }
 

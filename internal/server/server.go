@@ -1,14 +1,21 @@
 package server
 
 import (
+	"bufio"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	"go.opentelemetry.io/otel/trace"
 
 	commonapi "github.com/openjobspec/ojs-go-backend-common/api"
 	commoncore "github.com/openjobspec/ojs-go-backend-common/core"
@@ -38,7 +45,7 @@ func NewRouterWithRealtime(backend core.Backend, logger *slog.Logger, cfg Config
 
 	// Middleware
 	r.Use(middleware.Recoverer)
-	r.Use(ojsotel.HTTPMiddleware)
+	r.Use(otelHTTPMiddleware)
 	r.Use(metricsMiddleware)
 	r.Use(api.OJSHeaders)
 	r.Use(api.RequestLogger(logger))
@@ -77,7 +84,6 @@ func NewRouterWithRealtime(backend core.Backend, logger *slog.Logger, cfg Config
 	if subscriber == nil {
 		bus := events.NewBus(events.BusConfig{BufferSize: 256})
 		if publisher == nil {
-			publisher = bus
 			jobHandler.SetEventPublisher(bus)
 			workerHandler.SetEventPublisher(bus)
 		}
@@ -87,8 +93,8 @@ func NewRouterWithRealtime(backend core.Backend, logger *slog.Logger, cfg Config
 	// System endpoints
 	r.Get("/ojs/manifest", systemHandler.Manifest)
 	r.Get("/ojs/v1/health", systemHandler.Health)
-r.Get("/healthz", systemHandler.Healthz)
-r.Get("/readyz", systemHandler.Readyz)
+	r.Get("/healthz", systemHandler.Healthz)
+	r.Get("/readyz", systemHandler.Readyz)
 
 	// Job endpoints
 	r.Post("/ojs/v1/jobs", jobHandler.Create)
@@ -179,6 +185,63 @@ r.Get("/readyz", systemHandler.Readyz)
 	r.Post("/ojs/v1/ws/unsubscribe", wsBridgeHandler.Unsubscribe)
 
 	return r
+}
+
+// otelHTTPMiddleware mirrors the shared tracing middleware while preserving
+// streaming and hijacking interfaces required by SSE and WebSocket routes.
+func otelHTTPMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := ojsotel.Tracer().Start(ctx, r.Method+" "+r.URL.Path,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				semconv.HTTPRequestMethodKey.String(r.Method),
+				attribute.String("url.path", r.URL.Path),
+				semconv.ServerAddress(r.Host),
+			),
+		)
+		defer span.End()
+
+		sw := &streamingStatusWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(sw, r.WithContext(ctx))
+		span.SetAttributes(semconv.HTTPResponseStatusCode(sw.statusCode))
+	})
+}
+
+type streamingStatusWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *streamingStatusWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *streamingStatusWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *streamingStatusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (w *streamingStatusWriter) Push(target string, options *http.PushOptions) error {
+	pusher, ok := w.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return pusher.Push(target, options)
+}
+
+func (w *streamingStatusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func metricsMiddleware(next http.Handler) http.Handler {
