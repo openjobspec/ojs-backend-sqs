@@ -23,28 +23,30 @@ An [Open Job Spec (OJS)](https://github.com/openjobspec/openjobspec) backend imp
 ```
 
 This backend uses a **hybrid architecture**:
-- **AWS SQS** handles message transport (enqueue, dequeue, visibility timeout, dead letter)
-- **DynamoDB** tracks job state, metadata, workflows, cron definitions, and unique constraints
+- **AWS SQS** handles message transport and per-receipt visibility
+- **DynamoDB** owns lifecycle state, delivery generations, retry/DLQ policy,
+  durable delivery intents, workflows, cron definitions, and unique constraints
 
-The same `core.Backend` interface and HTTP API handlers from the [Redis backend](../ojs-backend-redis/) are reused. Only the storage layer changes.
+The same `core.Backend` interface and HTTP API handlers used by the
+[Redis backend](https://github.com/openjobspec/ojs-backend-redis) are reused.
+Only the storage layer changes.
 
 ## OJS-to-SQS Concept Mapping
 
 | OJS Concept | SQS Implementation |
 |---|---|
 | OJS queue | One SQS queue per OJS queue |
-| Job enqueue | `SendMessage` |
-| Batch enqueue | `SendMessageBatch` (max 10 per call, auto-chunked) |
-| Job fetch | `ReceiveMessage` with short polling |
-| Job ack | `DeleteMessage` |
-| Job nack (requeue) | `ChangeMessageVisibility` to 0 |
-| Job nack (exhausted) | `DeleteMessage` + DLQ in state store |
-| Visibility timeout | SQS `VisibilityTimeout` (native) |
+| Job enqueue | DynamoDB job + delivery intent, then idempotent `SendMessage` |
+| Batch enqueue | Durable intents + partial-result-aware `SendMessageBatch` |
+| Job fetch | `ReceiveMessage` + conditional available→active claim |
+| Job ack | Conditional terminal transition, then `DeleteMessage` |
+| Job nack (requeue) | New fenced delivery generation + durable intent |
+| Job nack (exhausted) | OJS DLQ marker in DynamoDB |
+| Visibility timeout | SQS receipt visibility + tracked delivery deadline/reaper |
 | Heartbeat | `ChangeMessageVisibility` (extend) |
 | Priority | Separate SQS queues per priority tier (via state store) |
-| Scheduled jobs (≤15min) | SQS `DelaySeconds` |
-| Scheduled jobs (>15min) | State store + scheduler goroutine |
-| Dead letter | SQS native DLQ + state store tracking |
+| Scheduled jobs | DynamoDB due marker + scheduler + delivery intent |
+| Dead letter | OJS state tracking; compatibility SQS DLQ has no redrive policy |
 | Job state | DynamoDB (SQS is opaque once in-flight) |
 | Unique jobs | DynamoDB conditional writes |
 | Workflows | DynamoDB state tracking |
@@ -94,7 +96,8 @@ make run
 |---|---|---|
 | `OJS_PORT` | `8080` | HTTP server port |
 | `AWS_REGION` | `us-east-1` | AWS region |
-| `AWS_ENDPOINT_URL` | _(empty)_ | Custom endpoint (for LocalStack: `http://localhost:4566`) |
+| `AWS_ENDPOINT_URL` | _(empty)_ | Custom AWS-compatible endpoint; preserves the normal AWS credential chain |
+| `OJS_LOCALSTACK_ENDPOINT` | _(empty)_ | Explicit LocalStack endpoint; enables static `test` credentials for local development |
 | `DYNAMODB_TABLE` | `ojs-jobs` | DynamoDB table name |
 | `SQS_QUEUE_PREFIX` | `ojs` | Prefix for SQS queue names |
 | `SQS_USE_FIFO` | `false` | Use FIFO queues (exactly-once, strict ordering) |
@@ -104,10 +107,17 @@ make run
 ```bash
 make build          # Build server binary to bin/ojs-server
 make test           # go test ./... -race -cover
-make lint           # golangci-lint run ./...
+make lint           # CI-pinned golangci-lint v1.64.8
 make run            # Build and run (needs LocalStack or real AWS)
 make docker-up      # Start server + LocalStack via Docker Compose
 make docker-down    # Stop Docker Compose
+```
+
+Run the conditional-claim/outbox concurrency suite against LocalStack:
+
+```bash
+OJS_LOCALSTACK_ENDPOINT=http://localhost:4566 go test ./internal/sqs \
+  -run TestLocalStack_ReliabilityAndConcurrency -race
 ```
 
 ### Development with Hot Reload
@@ -137,15 +147,37 @@ terraform apply
 
 This creates:
 - DynamoDB table with GSIs (pay-per-request billing)
-- SQS queues with DLQs for each configured OJS queue
+- SQS queues plus compatibility-named DLQs (without native redrive)
 - TTL enabled for automatic cleanup
+
+### Lambda HTTP adapter
+
+Serverless deployments can construct the supported HTTP surface without
+importing repository-internal packages:
+
+```go
+import ojslambda "github.com/openjobspec/ojs-backend-sqs/lambda"
+
+adapter, err := ojslambda.New(ctx)
+if err != nil {
+	return err
+}
+defer adapter.Close()
+
+var handler http.Handler = adapter
+```
+
+`New` uses the same environment configuration, DynamoDB table initialization,
+SQS backend, scheduler, realtime broker, authentication, and routes as the
+standalone server. `WithAWSConfig` can reuse an AWS SDK configuration already
+loaded by the Lambda process.
 
 ## Trade-offs vs. Redis/Postgres Backends
 
 ### Strengths
 - **Fully managed** — no infrastructure to maintain
-- **Native DLQ** — SQS dead letter queues with redrive policies
-- **Native visibility timeout** — first-class support, no polling needed
+- **Policy-correct retries** — crashed workers honor each job's OJS retry policy
+- **Fenced visibility ownership** — receipt and delivery generation are tracked
 - **Auto-scaling** — Standard queues scale to nearly unlimited throughput
 - **High durability** — multi-AZ replication by default
 - **Pay-per-use** — no idle cost for quiet queues
@@ -225,7 +257,3 @@ You can also use the legacy env vars `OJS_OTEL_ENABLED=true` and `OJS_OTEL_ENDPO
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
-
-
-
-

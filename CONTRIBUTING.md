@@ -4,7 +4,7 @@ Thank you for your interest in contributing to the SQS backend for Open Job Spec
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - Docker (for LocalStack and Redis)
 - AWS CLI (optional, for manual testing)
 
@@ -45,9 +45,8 @@ make run
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AWS_REGION` | `us-east-1` | AWS region |
-| `AWS_ENDPOINT_URL` | `http://localhost:4566` | LocalStack endpoint |
-| `AWS_ACCESS_KEY_ID` | `test` | AWS access key (LocalStack) |
-| `AWS_SECRET_ACCESS_KEY` | `test` | AWS secret key (LocalStack) |
+| `AWS_ENDPOINT_URL` | empty | Optional AWS-compatible endpoint; preserves normal credentials |
+| `OJS_LOCALSTACK_ENDPOINT` | `http://localhost:4566` | Explicit local-development endpoint using static test credentials |
 | `DYNAMODB_TABLE` | `ojs-jobs` | DynamoDB table for job state |
 | `SQS_QUEUE_PREFIX` | `ojs` | Prefix for SQS queue names |
 | `REDIS_URL` | `redis://localhost:6379` | Redis URL for state caching |
