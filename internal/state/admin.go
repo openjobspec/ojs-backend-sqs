@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -138,7 +139,11 @@ func (s *DynamoDBStore) ListAllWorkers(ctx context.Context, limit, offset int) (
 			}
 			if aj, ok := item["active_jobs"]; ok {
 				if ajv, ok := aj.(*types.AttributeValueMemberS); ok {
-					w.ActiveJobs, _ = strconv.Atoi(ajv.Value)
+					n, err := strconv.Atoi(ajv.Value)
+					if err != nil {
+						slog.Warn("admin: invalid active_jobs value", "value", ajv.Value, "error", err)
+					}
+					w.ActiveJobs = n
 				}
 			}
 

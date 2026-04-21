@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/openjobspec/ojs-backend-sqs/internal/core"
 )
@@ -275,20 +276,36 @@ func JobToRecord(job *core.Job) *JobRecord {
 		r.Error = string(job.Error)
 	}
 	if len(job.Errors) > 0 {
-		histJSON, _ := json.Marshal(job.Errors)
-		r.ErrorHistory = string(histJSON)
+		histJSON, err := json.Marshal(job.Errors)
+		if err != nil {
+			slog.Warn("store: failed to marshal error history", "job_id", job.ID, "error", err)
+		} else {
+			r.ErrorHistory = string(histJSON)
+		}
 	}
 	if job.Retry != nil {
-		retryJSON, _ := json.Marshal(job.Retry)
-		r.Retry = string(retryJSON)
+		retryJSON, err := json.Marshal(job.Retry)
+		if err != nil {
+			slog.Warn("store: failed to marshal retry policy", "job_id", job.ID, "error", err)
+		} else {
+			r.Retry = string(retryJSON)
+		}
 	}
 	if job.Unique != nil {
-		uniqueJSON, _ := json.Marshal(job.Unique)
-		r.Unique = string(uniqueJSON)
+		uniqueJSON, err := json.Marshal(job.Unique)
+		if err != nil {
+			slog.Warn("store: failed to marshal unique policy", "job_id", job.ID, "error", err)
+		} else {
+			r.Unique = string(uniqueJSON)
+		}
 	}
 	if len(job.ParentResults) > 0 {
-		prJSON, _ := json.Marshal(job.ParentResults)
-		r.ParentResults = string(prJSON)
+		prJSON, err := json.Marshal(job.ParentResults)
+		if err != nil {
+			slog.Warn("store: failed to marshal parent results", "job_id", job.ID, "error", err)
+		} else {
+			r.ParentResults = string(prJSON)
+		}
 	}
 
 	// Store unknown fields

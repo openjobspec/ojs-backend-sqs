@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -73,8 +74,12 @@ func (b *SQSBackend) RegisterCron(ctx context.Context, cronJob *core.CronJob) (*
 	// Convert to storage record
 	var jobTemplateJSON string
 	if cronJob.JobTemplate != nil {
-		data, _ := json.Marshal(cronJob.JobTemplate)
-		jobTemplateJSON = string(data)
+		data, err := json.Marshal(cronJob.JobTemplate)
+		if err != nil {
+			slog.Warn("register cron: failed to marshal job template", "name", cronJob.Name, "error", err)
+		} else {
+			jobTemplateJSON = string(data)
+		}
 	}
 
 	record := &state.CronRecord{

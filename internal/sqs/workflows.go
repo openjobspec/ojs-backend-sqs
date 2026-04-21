@@ -45,11 +45,18 @@ func (b *SQSBackend) CreateWorkflow(ctx context.Context, req *core.WorkflowReque
 	// Store workflow metadata
 	var callbacksJSON string
 	if req.Callbacks != nil {
-		data, _ := json.Marshal(req.Callbacks)
-		callbacksJSON = string(data)
+		data, err := json.Marshal(req.Callbacks)
+		if err != nil {
+			slog.Warn("create workflow: failed to marshal callbacks", "error", err)
+		} else {
+			callbacksJSON = string(data)
+		}
 	}
 
-	jobDefsJSON, _ := json.Marshal(jobs)
+	jobDefsJSON, err := json.Marshal(jobs)
+	if err != nil {
+		slog.Warn("create workflow: failed to marshal job definitions", "error", err)
+	}
 
 	record := &state.WorkflowRecord{
 		ID:        wfID,

@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -518,7 +519,10 @@ func (s *DynamoDBStore) GetQueueCompletedCount(ctx context.Context, name string)
 
 	if completedAttr, ok := result.Item["completed"]; ok {
 		if completedVal, ok := completedAttr.(*types.AttributeValueMemberN); ok {
-			count, _ := strconv.Atoi(completedVal.Value)
+			count, err := strconv.Atoi(completedVal.Value)
+			if err != nil {
+				slog.Warn("dynamodb: invalid completed count", "value", completedVal.Value, "error", err)
+			}
 			return count, nil
 		}
 	}
@@ -769,7 +773,11 @@ func (s *DynamoDBStore) GetWorkflowResults(ctx context.Context, workflowID strin
 
 		if idxAttr, ok := item["step_idx"]; ok {
 			if idxVal, ok := idxAttr.(*types.AttributeValueMemberN); ok {
-				stepIdx, _ = strconv.Atoi(idxVal.Value)
+				n, err := strconv.Atoi(idxVal.Value)
+				if err != nil {
+					slog.Warn("dynamodb: invalid step_idx value", "value", idxVal.Value, "error", err)
+				}
+				stepIdx = n
 			}
 		}
 
