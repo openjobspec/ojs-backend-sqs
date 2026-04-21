@@ -37,7 +37,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	cfg := server.LoadConfig()
-	if err := cfg.BaseConfig.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		logger.Error("configuration error", "error", err)
 		os.Exit(1)
 	}
@@ -57,8 +57,6 @@ func main() {
 		logger.Error("failed to initialize OpenTelemetry", "error", otelErr)
 		os.Exit(1)
 	}
-	defer func() { _ = otelShutdown(context.Background()) }()
-
 	// Configure AWS SDK
 	awsCfg, err := buildAWSConfig(cfg)
 	if err != nil {
@@ -76,6 +74,7 @@ func main() {
 		logger.Error("failed to ensure DynamoDB table", "error", err)
 		os.Exit(1)
 	}
+	defer func() { _ = otelShutdown(context.Background()) }()
 	logger.Info("DynamoDB state store ready", "table", cfg.DynamoDBTable)
 
 	// Create SQS backend
@@ -129,7 +128,8 @@ func main() {
 	reflection.Register(grpcServer)
 
 	go func() {
-		lis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
+		var listenConfig net.ListenConfig
+		lis, err := listenConfig.Listen(context.Background(), "tcp", ":"+cfg.GRPCPort)
 		if err != nil {
 			logger.Error("failed to listen for gRPC", "port", cfg.GRPCPort, "error", err)
 			os.Exit(1)
@@ -164,23 +164,20 @@ func buildAWSConfig(cfg server.Config) (aws.Config, error) {
 		config.WithRegion(cfg.AWSRegion),
 	}
 
-	// For LocalStack or custom endpoints
-	if cfg.AWSEndpointURL != "" {
-		customResolver := aws.EndpointResolverWithOptionsFunc(
-			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-				return aws.Endpoint{
-					URL:               cfg.AWSEndpointURL,
-					HostnameImmutable: true,
-					PartitionID:       "aws",
-				}, nil
-			},
-		)
+	// A custom AWS endpoint must retain the normal credential chain. Only the
+	// explicit LocalStack endpoint opts into static test credentials.
+	endpoint := cfg.AWSEndpointURL
+	if cfg.LocalStackEndpoint != "" {
+		endpoint = cfg.LocalStackEndpoint
+	}
+	if endpoint != "" {
+		opts = append(opts, config.WithBaseEndpoint(endpoint))
+	}
+	if cfg.LocalStackEndpoint != "" {
 		opts = append(opts,
-			config.WithEndpointResolverWithOptions(customResolver),
 			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "test")),
 		)
 	}
 
 	return config.LoadDefaultConfig(context.Background(), opts...)
 }
-
