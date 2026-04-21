@@ -13,6 +13,7 @@ import (
 type Scheduler struct {
 	backend  *sqsbackend.SQSBackend
 	stop     chan struct{}
+	wg       sync.WaitGroup
 	stopOnce sync.Once
 	logger   *slog.Logger
 }
@@ -28,6 +29,7 @@ func New(backend *sqsbackend.SQSBackend, logger *slog.Logger) *Scheduler {
 
 // Start begins all background scheduling goroutines.
 func (s *Scheduler) Start() {
+	s.wg.Add(3)
 	// Promote scheduled jobs that are due (stored in state store for delays > 15min)
 	go s.runLoop("scheduled-promoter", 1*time.Second, s.backend.PromoteScheduled)
 
@@ -42,14 +44,16 @@ func (s *Scheduler) Start() {
 	go s.runLoop("cron-scheduler", 10*time.Second, s.backend.FireCronJobs)
 }
 
-// Stop signals all background goroutines to stop.
+// Stop signals all background goroutines to stop and waits for them to finish.
 func (s *Scheduler) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 	})
+	s.wg.Wait()
 }
 
 func (s *Scheduler) runLoop(name string, interval time.Duration, fn func(context.Context) error) {
+	defer s.wg.Done()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -59,10 +63,10 @@ func (s *Scheduler) runLoop(name string, interval time.Duration, fn func(context
 			return
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
 			if err := fn(ctx); err != nil {
 				s.logger.Error("scheduler loop error", "loop", name, "error", err)
 			}
+			cancel()
 		}
 	}
 }
