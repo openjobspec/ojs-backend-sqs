@@ -5,6 +5,7 @@ CONFORMANCE_SUITES = ../../suites
 OJS_URL ?= http://localhost:8080
 AWS_ENDPOINT_URL ?= http://localhost:4566
 REDIS_URL ?= redis://localhost:6379
+GOLANGCI_LINT_VERSION ?= v2.12.2
 
 build:
 	go build -o bin/ojs-server ./cmd/ojs-server
@@ -23,7 +24,7 @@ test:
 	go test ./... -race -cover
 
 lint:
-	golangci-lint run ./...
+	GOWORK=off go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 lint-vet:
 	go vet ./...

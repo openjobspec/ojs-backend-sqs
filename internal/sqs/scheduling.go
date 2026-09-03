@@ -2,6 +2,7 @@ package sqs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -15,6 +16,9 @@ func (b *SQSBackend) PromoteScheduled(ctx context.Context) error {
 	jobIDs, err := b.store.GetDueScheduledJobs(ctx, nowMs)
 	if err != nil {
 		return err
+	}
+	if store, ok := b.reliabilityStore(); ok {
+		return b.promoteReliable(ctx, store, jobIDs, core.StateScheduled, "scheduled")
 	}
 
 	var firstErr error
@@ -55,7 +59,7 @@ func (b *SQSBackend) PromoteScheduled(ctx context.Context) error {
 		job := state.RecordToJob(record)
 		job.State = core.StateAvailable
 		job.EnqueuedAt = core.FormatTime(now)
-		if _, err := b.sendToSQS(ctx, job); err != nil {
+		if err := b.sendToSQS(ctx, job); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("send promoted scheduled job %s: %w", jobID, err)
 			}
@@ -73,6 +77,9 @@ func (b *SQSBackend) PromoteRetries(ctx context.Context) error {
 	jobIDs, err := b.store.GetDueRetryJobs(ctx, nowMs)
 	if err != nil {
 		return err
+	}
+	if store, ok := b.reliabilityStore(); ok {
+		return b.promoteReliable(ctx, store, jobIDs, core.StateRetryable, "retry")
 	}
 
 	var firstErr error
@@ -113,7 +120,7 @@ func (b *SQSBackend) PromoteRetries(ctx context.Context) error {
 		job := state.RecordToJob(record)
 		job.State = core.StateAvailable
 		job.EnqueuedAt = core.FormatTime(now)
-		if _, err := b.sendToSQS(ctx, job); err != nil {
+		if err := b.sendToSQS(ctx, job); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("send promoted retry job %s: %w", jobID, err)
 			}
@@ -125,3 +132,49 @@ func (b *SQSBackend) PromoteRetries(ctx context.Context) error {
 	return firstErr
 }
 
+func (b *SQSBackend) promoteReliable(ctx context.Context, store state.JobReliabilityStore, jobIDs []string, expectedState, sourceType string) error {
+	var firstErr error
+	for _, jobID := range jobIDs {
+		record, err := b.store.GetJob(ctx, jobID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("load %s job %s: %w", sourceType, jobID, err)
+			}
+			continue
+		}
+		if record.State != expectedState {
+			continue
+		}
+
+		generation := record.DeliveryGeneration + 1
+		intent := newDeliveryIntent(jobID, record.Queue, generation, sourceType)
+		_, err = b.transitionReliable(ctx, store, &state.JobTransitionPlan{
+			JobID:                      jobID,
+			Queue:                      record.Queue,
+			CreatedAt:                  record.CreatedAt,
+			FromState:                  expectedState,
+			ToState:                    core.StateAvailable,
+			ExpectedVersion:            record.Version,
+			MatchVersion:               true,
+			ExpectedDeliveryGeneration: record.DeliveryGeneration,
+			MatchDeliveryGeneration:    false,
+			Intent:                     intent,
+			Updates: map[string]any{
+				"enqueued_at":          core.NowFormatted(),
+				"delivery_generation":  generation,
+				"sqs_receipt_handle":   "",
+				"worker_id":            "",
+				"delivery_deadline_ms": int64(0),
+			},
+		})
+		if err != nil && !errors.Is(err, state.ErrConditionFailed) {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("promote %s job %s: %w", sourceType, jobID, err)
+			}
+		}
+	}
+	if err := b.DrainDeliveryOutbox(ctx); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}

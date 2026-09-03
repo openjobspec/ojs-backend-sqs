@@ -16,4 +16,3 @@ func NewJobHandler(backend core.Backend) *JobHandler {
 
 // RequestToJob converts an EnqueueRequest into a Job for backend Push.
 var RequestToJob = commonapi.RequestToJob
-

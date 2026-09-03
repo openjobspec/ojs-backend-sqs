@@ -201,8 +201,26 @@ func (s *Server) Nack(ctx context.Context, req *ojsv1.NackRequest) (*ojsv1.NackR
 
 func (s *Server) Heartbeat(ctx context.Context, req *ojsv1.HeartbeatRequest) (*ojsv1.HeartbeatResponse, error) {
 	visibilityMs := core.DefaultVisibilityTimeoutMs
+	if req.ExtendBy != nil {
+		visibilityMs = int(req.ExtendBy.AsDuration().Milliseconds())
+	}
+	workerID := req.WorkerId
+	var activeJobs []string
+	if req.Id != "" {
+		activeJobs = []string{req.Id}
+		if workerID == "" {
+			job, err := s.backend.Info(ctx, req.Id)
+			if err != nil {
+				return nil, coreErrorToGRPC(err)
+			}
+			workerID = job.WorkerID
+		}
+	}
+	if workerID == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker_id is required")
+	}
 
-	hbResp, err := s.backend.Heartbeat(ctx, req.WorkerId, nil, visibilityMs)
+	hbResp, err := s.backend.Heartbeat(ctx, workerID, activeJobs, visibilityMs)
 	if err != nil {
 		return nil, coreErrorToGRPC(err)
 	}
@@ -311,9 +329,9 @@ func (s *Server) DeleteDeadLetter(ctx context.Context, req *ojsv1.DeleteDeadLett
 
 func (s *Server) RegisterCron(ctx context.Context, req *ojsv1.RegisterCronRequest) (*ojsv1.RegisterCronResponse, error) {
 	argsJSON, err := json.Marshal(valuesToInterface(req.Args))
-if err != nil {
-return nil, status.Errorf(codes.InvalidArgument, "failed to marshal cron args: %v", err)
-}
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "failed to marshal cron args: %v", err)
+	}
 
 	cronJob := &core.CronJob{
 		Name:       req.Name,
@@ -386,7 +404,10 @@ func (s *Server) ListCron(ctx context.Context, req *ojsv1.ListCronRequest) (*ojs
 // --- Workflow RPCs ---
 
 func (s *Server) CreateWorkflow(ctx context.Context, req *ojsv1.CreateWorkflowRequest) (*ojsv1.CreateWorkflowResponse, error) {
-	wfReq := protoToWorkflowRequest(req)
+	wfReq, err := protoToWorkflowRequest(req)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid workflow DAG: %v", err)
+	}
 
 	wf, err := s.backend.CreateWorkflow(ctx, wfReq)
 	if err != nil {
@@ -471,35 +492,16 @@ func (s *Server) StreamEvents(req *ojsv1.StreamEventsRequest, stream ojsv1.OJSSe
 		return status.Errorf(codes.Unavailable, "event streaming is not configured")
 	}
 
-	ctx := stream.Context()
-
-	var (
-		ch    <-chan *core.JobEvent
-		unsub func()
-		err   error
-	)
-
-	if req.JobId != "" {
-		ch, unsub, err = s.subscriber.SubscribeJob(req.JobId)
-	} else if len(req.Queues) == 1 {
-		ch, unsub, err = s.subscriber.SubscribeQueue(req.Queues[0])
-	} else {
-		ch, unsub, err = s.subscriber.SubscribeAll()
-	}
+	ch, unsub, err := s.subscribeForRequest(req)
 	if err != nil {
 		return status.Errorf(codes.Internal, "failed to subscribe: %v", err)
 	}
 	defer unsub()
 
-	queueFilter := make(map[string]bool, len(req.Queues))
-	for _, q := range req.Queues {
-		queueFilter[q] = true
-	}
-	typeFilter := make(map[string]bool, len(req.EventTypes))
-	for _, t := range req.EventTypes {
-		typeFilter[t] = true
-	}
+	queueFilter := stringSet(req.Queues)
+	typeFilter := stringSet(req.EventTypes)
 
+	ctx := stream.Context()
 	keepalive := time.NewTicker(30 * time.Second)
 	defer keepalive.Stop()
 
@@ -511,27 +513,62 @@ func (s *Server) StreamEvents(req *ojsv1.StreamEventsRequest, stream ojsv1.OJSSe
 			if !ok {
 				return nil
 			}
-			if len(queueFilter) > 0 && !queueFilter[event.Queue] {
+			if !eventMatchesFilters(event, queueFilter, typeFilter) {
 				continue
 			}
-			if len(typeFilter) > 0 && !typeFilter[event.EventType] {
-				continue
-			}
-
-			protoEvent := jobEventToProto(event)
-			if err := stream.Send(protoEvent); err != nil {
+			if err := stream.Send(jobEventToProto(event)); err != nil {
 				return err
 			}
 		case <-keepalive.C:
-			ka := &ojsv1.Event{
-				Id:        "evt_keepalive",
-				Type:      "stream.keepalive",
-				Timestamp: timestamppb.Now(),
-			}
-			if err := stream.Send(ka); err != nil {
+			if err := stream.Send(keepaliveEvent()); err != nil {
 				return err
 			}
 		}
+	}
+}
+
+// subscribeForRequest selects the appropriate event subscription for a stream
+// request: a single job, a single queue, or all events.
+func (s *Server) subscribeForRequest(req *ojsv1.StreamEventsRequest) (<-chan *core.JobEvent, func(), error) {
+	if req.JobId != "" {
+		return s.subscriber.SubscribeJob(req.JobId)
+	}
+	if len(req.Queues) == 1 {
+		return s.subscriber.SubscribeQueue(req.Queues[0])
+	}
+	return s.subscriber.SubscribeAll()
+}
+
+// eventMatchesFilters reports whether an event passes the optional queue and
+// event-type filters (an empty filter matches everything).
+func eventMatchesFilters(event *core.JobEvent, queueFilter, typeFilter map[string]bool) bool {
+	if len(queueFilter) > 0 && !queueFilter[event.Queue] {
+		return false
+	}
+	if len(typeFilter) > 0 && !typeFilter[event.EventType] {
+		return false
+	}
+	return true
+}
+
+// stringSet builds a lookup set from a slice, returning nil for an empty slice.
+func stringSet(values []string) map[string]bool {
+	if len(values) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(values))
+	for _, v := range values {
+		set[v] = true
+	}
+	return set
+}
+
+// keepaliveEvent builds the periodic stream keepalive event.
+func keepaliveEvent() *ojsv1.Event {
+	return &ojsv1.Event{
+		Id:        "evt_keepalive",
+		Type:      "stream.keepalive",
+		Timestamp: timestamppb.Now(),
 	}
 }
 
@@ -644,8 +681,6 @@ func parseRFC3339(s string) *timestamppb.Timestamp {
 	}
 	return timestamppb.New(t)
 }
-
-func intPtr(v int) *int { return &v }
 
 // directiveToWorkerState maps a backend heartbeat directive string to the
 // protobuf WorkerState enum.

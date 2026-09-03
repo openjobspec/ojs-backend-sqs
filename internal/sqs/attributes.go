@@ -10,16 +10,17 @@ import (
 
 // OJS message attribute names. SQS allows max 10 message attributes per message.
 const (
-	AttrOJSSpecVersion = "ojs.specversion"
-	AttrOJSType        = "ojs.type"
-	AttrOJSQueue       = "ojs.queue"
-	AttrOJSPriority    = "ojs.priority"
-	AttrOJSID          = "ojs.id"
-	AttrOJSAttempt     = "ojs.attempt"
-	AttrOJSScheduledAt = "ojs.scheduled_at"
-	AttrOJSUniqueKey   = "ojs.unique_key"
-	AttrOJSTraceID     = "ojs.trace_id"
-	AttrOJSCreatedAt   = "ojs.created_at"
+	AttrOJSSpecVersion        = "ojs.specversion"
+	AttrOJSType               = "ojs.type"
+	AttrOJSQueue              = "ojs.queue"
+	AttrOJSPriority           = "ojs.priority"
+	AttrOJSID                 = "ojs.id"
+	AttrOJSAttempt            = "ojs.attempt"
+	AttrOJSScheduledAt        = "ojs.scheduled_at"
+	AttrOJSUniqueKey          = "ojs.unique_key"
+	AttrOJSTraceID            = "ojs.trace_id"
+	AttrOJSCreatedAt          = "ojs.created_at"
+	AttrOJSDeliveryGeneration = "ojs.delivery_generation"
 )
 
 // BuildMessageAttributes creates SQS message attributes from a Job.
@@ -73,6 +74,15 @@ func BuildMessageAttributes(job *core.Job) map[string]types.MessageAttributeValu
 		}
 	}
 
+	return attrs
+}
+
+func buildDeliveryMessageAttributes(job *core.Job, generation int64) map[string]types.MessageAttributeValue {
+	attrs := BuildMessageAttributes(job)
+	attrs[AttrOJSDeliveryGeneration] = types.MessageAttributeValue{
+		DataType:    strPtr("Number"),
+		StringValue: strPtr(strconv.FormatInt(generation, 10)),
+	}
 	return attrs
 }
 

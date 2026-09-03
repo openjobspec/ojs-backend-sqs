@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -447,15 +446,7 @@ func newTestDynamoStoreWithURL(t *testing.T, serverURL string) *DynamoDBStore {
 		context.Background(),
 		config.WithRegion("us-east-1"),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "test")),
-		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
-			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-				return aws.Endpoint{
-					URL:               serverURL,
-					HostnameImmutable: true,
-					PartitionID:       "aws",
-				}, nil
-			},
-		)),
+		config.WithBaseEndpoint(serverURL),
 	)
 	if err != nil {
 		t.Fatalf("load aws config: %v", err)
@@ -465,4 +456,55 @@ func newTestDynamoStoreWithURL(t *testing.T, serverURL string) *DynamoDBStore {
 		o.RetryMaxAttempts = 1
 	})
 	return NewDynamoDBStore(client, "ojs-jobs-test")
+}
+
+// TestUpdateJobState_NoDuplicateStatePath guards against a regression where
+// UpdateJobState emitted two assignments for the "state" attribute (once from
+// newState and once from a caller-supplied updates["state"]), which real
+// DynamoDB rejects with "Two document paths overlap".
+func TestUpdateJobState_NoDuplicateStatePath(t *testing.T) {
+	var updateBody []byte
+
+	store := newTestDynamoStore(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		switch r.Header.Get("X-Amz-Target") {
+		case "DynamoDB_20120810.GetItem":
+			// UpdateJobState reads the job first to compute GSI attributes.
+			_, _ = io.WriteString(w, `{"Item":{"PK":{"S":"job-1"},"SK":{"S":"JOB"},"state":{"S":"active"},"created_at":{"S":"2025-01-01T00:00:00.000Z"}}}`)
+		case "DynamoDB_20120810.UpdateItem":
+			updateBody, _ = io.ReadAll(r.Body)
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			_, _ = io.WriteString(w, `{}`)
+		}
+	})
+
+	// These updates intentionally include "state", exactly as Cancel/Fetch/Ack/Nack do.
+	err := store.UpdateJobState(context.Background(), "job-1", "cancelled", map[string]any{
+		"state":              "cancelled",
+		"cancelled_at":       "2025-01-01T00:00:01.000Z",
+		"sqs_receipt_handle": "",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req struct {
+		UpdateExpression         string            `json:"UpdateExpression"`
+		ExpressionAttributeNames map[string]string `json:"ExpressionAttributeNames"`
+	}
+	if err := json.Unmarshal(updateBody, &req); err != nil {
+		t.Fatalf("failed to parse UpdateItem body: %v (body=%s)", err, updateBody)
+	}
+
+	stateAssignments := 0
+	for _, attr := range req.ExpressionAttributeNames {
+		if attr == "state" {
+			stateAssignments++
+		}
+	}
+	if stateAssignments != 1 {
+		t.Errorf("expected exactly one 'state' assignment, got %d (names=%v, expr=%q)",
+			stateAssignments, req.ExpressionAttributeNames, req.UpdateExpression)
+	}
 }

@@ -8,7 +8,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"github.com/openjobspec/ojs-backend-sqs/internal/core"
 )
@@ -76,8 +75,9 @@ func (b *SQSBackend) getOrCreateQueueURL(ctx context.Context, ojsQueue string) (
 
 	url := *result.QueueUrl
 
-	// Also create DLQ
-	go b.ensureDLQ(context.Background(), ojsQueue, url)
+	// Preserve the historical DLQ queue name, but keep retries under OJS state
+	// management rather than SQS's fixed maxReceiveCount redrive policy.
+	b.ensureManagedQueueConfiguration(ctx, ojsQueue, url)
 
 	// Cache the URL
 	b.queueURLsMu.Lock()
@@ -87,8 +87,9 @@ func (b *SQSBackend) getOrCreateQueueURL(ctx context.Context, ojsQueue string) (
 	return url, nil
 }
 
-// ensureDLQ creates a dead letter queue and configures the redrive policy.
-func (b *SQSBackend) ensureDLQ(ctx context.Context, ojsQueue, mainQueueURL string) {
+// ensureManagedQueueConfiguration preserves the existing native DLQ resource
+// while clearing any legacy redrive policy that bypasses per-job OJS retry rules.
+func (b *SQSBackend) ensureManagedQueueConfiguration(ctx context.Context, ojsQueue, mainQueueURL string) {
 	dlqName := b.sqsDLQName(ojsQueue)
 	dlqAttrs := map[string]string{
 		"MessageRetentionPeriod": "1209600", // 14 days
@@ -98,36 +99,25 @@ func (b *SQSBackend) ensureDLQ(ctx context.Context, ojsQueue, mainQueueURL strin
 		dlqAttrs["ContentBasedDeduplication"] = "true"
 	}
 
-	dlqResult, err := b.sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
+	if _, err := b.sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
 		QueueName:  aws.String(dlqName),
 		Attributes: dlqAttrs,
-	})
-	if err != nil {
-		return
+	}); err != nil {
+		b.logger.Warn("failed to ensure compatibility DLQ", "queue", ojsQueue, "error", err)
 	}
 
-	// Get the DLQ ARN
-	dlqAttrsResult, err := b.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
-		QueueUrl:       dlqResult.QueueUrl,
-		AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameQueueArn},
-	})
-	if err != nil {
-		return
-	}
-
-	dlqArn, ok := dlqAttrsResult.Attributes["QueueArn"]
-	if !ok {
-		return
-	}
-
-	// Set redrive policy on main queue (max 3 receives before DLQ)
-	redrivePolicy := fmt.Sprintf(`{"deadLetterTargetArn":"%s","maxReceiveCount":"3"}`, dlqArn)
-	b.sqsClient.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
+	// AWS removes RedrivePolicy when it is set to an empty string. LocalStack
+	// versions that do not support removal return an error, which is safe to log:
+	// new queues never receive a redrive policy and existing AWS queues are
+	// updated whenever supported.
+	if _, err := b.sqsClient.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
 		QueueUrl: aws.String(mainQueueURL),
 		Attributes: map[string]string{
-			"RedrivePolicy": redrivePolicy,
+			"RedrivePolicy": "",
 		},
-	})
+	}); err != nil {
+		b.logger.Warn("failed to clear legacy SQS redrive policy", "queue", ojsQueue, "error", err)
+	}
 }
 
 // getQueueURL gets an existing queue URL without creating it.

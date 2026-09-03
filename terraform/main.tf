@@ -96,6 +96,8 @@ resource "aws_dynamodb_table" "ojs_jobs" {
 }
 
 # SQS queues for each default queue
+# Compatibility DLQ resource. OJS retry exhaustion is tracked in DynamoDB;
+# the main queue intentionally has no native redrive policy.
 resource "aws_sqs_queue" "ojs_dlq" {
   for_each = toset(var.default_queues)
 
@@ -125,11 +127,6 @@ resource "aws_sqs_queue" "ojs_queue" {
 
   fifo_queue                  = var.use_fifo
   content_based_deduplication = var.use_fifo
-
-  redrive_policy = jsonencode({
-    deadLetterTargetArn = aws_sqs_queue.ojs_dlq[each.value].arn
-    maxReceiveCount     = 3
-  })
 
   tags = {
     Environment = var.environment

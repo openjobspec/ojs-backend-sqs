@@ -13,11 +13,13 @@ import (
 )
 
 type storeMock struct {
-	putJobFn         func(ctx context.Context, record *state.JobRecord) error
-	getJobFn         func(ctx context.Context, jobID string) (*state.JobRecord, error)
-	updateJobStateFn func(ctx context.Context, jobID, newState string, updates map[string]any) error
-	registerQueueFn  func(ctx context.Context, name string) error
-	closeFn          func() error
+	putJobFn               func(ctx context.Context, record *state.JobRecord) error
+	getJobFn               func(ctx context.Context, jobID string) (*state.JobRecord, error)
+	updateJobStateFn       func(ctx context.Context, jobID, newState string, updates map[string]any) error
+	registerQueueFn        func(ctx context.Context, name string) error
+	isInDeadLetterFn       func(ctx context.Context, jobID string) (bool, error)
+	removeFromDeadLetterFn func(ctx context.Context, jobID string) error
+	closeFn                func() error
 }
 
 func (m *storeMock) PutJob(ctx context.Context, record *state.JobRecord) error {
@@ -148,9 +150,17 @@ func (m *storeMock) ListAllWorkers(ctx context.Context, limit, offset int) ([]*c
 
 func (m *storeMock) AddToDeadLetter(ctx context.Context, jobID string) error { return nil }
 
-func (m *storeMock) RemoveFromDeadLetter(ctx context.Context, jobID string) error { return nil }
+func (m *storeMock) RemoveFromDeadLetter(ctx context.Context, jobID string) error {
+	if m.removeFromDeadLetterFn != nil {
+		return m.removeFromDeadLetterFn(ctx, jobID)
+	}
+	return nil
+}
 
 func (m *storeMock) IsInDeadLetter(ctx context.Context, jobID string) (bool, error) {
+	if m.isInDeadLetterFn != nil {
+		return m.isInDeadLetterFn(ctx, jobID)
+	}
 	return false, nil
 }
 
@@ -248,3 +258,85 @@ func TestNack_RequeueReturnsUpdateError(t *testing.T) {
 	}
 }
 
+func TestCancel_ReturnsUpdateError(t *testing.T) {
+	backend := &SQSBackend{
+		store: &storeMock{
+			getJobFn: func(context.Context, string) (*state.JobRecord, error) {
+				return &state.JobRecord{
+					ID:    "job-1",
+					SK:    "JOB",
+					State: core.StateAvailable, // non-terminal, no receipt handle
+					Queue: "default",
+				}, nil
+			},
+			updateJobStateFn: func(context.Context, string, string, map[string]any) error {
+				return errors.New("update failed")
+			},
+		},
+		logger: slog.Default(),
+	}
+
+	_, err := backend.Cancel(context.Background(), "job-1")
+	if err == nil {
+		t.Fatal("expected cancel to surface the state-store update error")
+	}
+	if !strings.Contains(err.Error(), "cancel job") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCancel_SuccessReturnsCancelledJob(t *testing.T) {
+	backend := &SQSBackend{
+		store: &storeMock{
+			getJobFn: func(context.Context, string) (*state.JobRecord, error) {
+				return &state.JobRecord{
+					ID:    "job-1",
+					SK:    "JOB",
+					State: core.StateAvailable,
+					Queue: "default",
+				}, nil
+			},
+			updateJobStateFn: func(context.Context, string, string, map[string]any) error {
+				return nil
+			},
+		},
+		logger: slog.Default(),
+	}
+
+	job, err := backend.Cancel(context.Background(), "job-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if job.State != core.StateCancelled {
+		t.Fatalf("state = %q, want %q", job.State, core.StateCancelled)
+	}
+}
+
+func TestRetryDeadLetter_ReturnsUpdateError(t *testing.T) {
+	backend := &SQSBackend{
+		store: &storeMock{
+			isInDeadLetterFn: func(context.Context, string) (bool, error) { return true, nil },
+			getJobFn: func(context.Context, string) (*state.JobRecord, error) {
+				return &state.JobRecord{
+					ID:    "job-1",
+					SK:    "JOB",
+					State: core.StateDiscarded,
+					Queue: "default",
+				}, nil
+			},
+			updateJobStateFn: func(context.Context, string, string, map[string]any) error {
+				return errors.New("update failed")
+			},
+		},
+		logger: slog.Default(),
+	}
+
+	// Must fail before re-enqueueing to SQS so state store and SQS cannot diverge.
+	_, err := backend.RetryDeadLetter(context.Background(), "job-1")
+	if err == nil {
+		t.Fatal("expected retry to surface the state-store update error")
+	}
+	if !strings.Contains(err.Error(), "retry dead letter job") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

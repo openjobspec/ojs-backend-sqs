@@ -51,7 +51,7 @@ func BenchmarkJobCreate(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/ojs/v1/jobs", strings.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/ojs/v1/jobs", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
@@ -64,7 +64,7 @@ func BenchmarkJobGet(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/ojs/v1/jobs/test-id", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ojs/v1/jobs/test-id", nil)
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
 	}
@@ -82,7 +82,7 @@ func BenchmarkWorkerFetch(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/ojs/v1/workers/fetch", strings.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/ojs/v1/workers/fetch", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)

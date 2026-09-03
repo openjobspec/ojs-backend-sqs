@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 
 	"github.com/openjobspec/ojs-backend-sqs/internal/core"
@@ -41,6 +42,9 @@ type JobRecord struct {
 	WorkerID            string            `dynamodbav:"worker_id,omitempty"`
 	SQSReceiptHandle    string            `dynamodbav:"sqs_receipt_handle,omitempty"`
 	SQSMessageID        string            `dynamodbav:"sqs_message_id,omitempty"`
+	Version             int64             `dynamodbav:"version,omitempty"`
+	DeliveryGeneration  int64             `dynamodbav:"delivery_generation,omitempty"`
+	DeliveryDeadlineMs  int64             `dynamodbav:"delivery_deadline_ms,omitempty"`
 	UnknownFields       map[string]string `dynamodbav:"unknown_fields,omitempty"`
 	ParentResults       string            `dynamodbav:"parent_results,omitempty"`
 
@@ -49,7 +53,7 @@ type JobRecord struct {
 	GSI1SK string `dynamodbav:"GSI1SK,omitempty"` // STATE#<state>#<created_at>
 	GSI2PK string `dynamodbav:"GSI2PK,omitempty"` // STATE#<state>
 	GSI2SK string `dynamodbav:"GSI2SK,omitempty"` // <created_at>
-	TTL    *int64 `dynamodbav:"ttl,omitempty"`     // DynamoDB TTL
+	TTL    *int64 `dynamodbav:"ttl,omitempty"`    // DynamoDB TTL
 }
 
 // Store defines the interface for the external state store.
@@ -127,6 +131,195 @@ type Store interface {
 	Close() error
 }
 
+var (
+	// ErrConditionFailed means another caller won a conditional state transition.
+	ErrConditionFailed = errors.New("dynamodb condition failed")
+	// ErrAlreadyApplied means an idempotent workflow completion was already recorded.
+	ErrAlreadyApplied = errors.New("operation already applied")
+	// ErrCorruptItem means a stored item has an incompatible DynamoDB attribute type.
+	ErrCorruptItem = errors.New("corrupt dynamodb item")
+)
+
+// DeliveryIntent is a durable, stable request to publish one job delivery to SQS.
+type DeliveryIntent struct {
+	PK         string `dynamodbav:"PK"`
+	SK         string `dynamodbav:"SK"`
+	ID         string `dynamodbav:"intent_id"`
+	JobID      string `dynamodbav:"job_id"`
+	Queue      string `dynamodbav:"queue"`
+	Generation int64  `dynamodbav:"delivery_generation"`
+	SourceType string `dynamodbav:"source_type,omitempty"`
+	CreatedAt  string `dynamodbav:"created_at"`
+	Attempts   int    `dynamodbav:"attempts,omitempty"`
+	LastError  string `dynamodbav:"last_error,omitempty"`
+}
+
+// UniqueKeyRecord is the strongly-consistent unique mapping and its expiration.
+type UniqueKeyRecord struct {
+	JobID                   string
+	ExpiresAtUnix           int64
+	ReplacementGuardUntilMs int64
+}
+
+// UniqueJobPlan describes the unique-key compare-and-swap performed with job creation.
+type UniqueJobPlan struct {
+	Fingerprint                string
+	ExpiresAtUnix              int64
+	NowUnix                    int64
+	ExpectedMappingJobID       string
+	CancelExisting             bool
+	ExistingState              string
+	ExistingVersion            int64
+	ExistingDeliveryGeneration int64
+	ExistingQueue              string
+	ExistingCreatedAt          string
+	ExistingWorkflowID         string
+	CancelledAt                string
+	ReplacementGuardUntilMs    int64
+}
+
+// JobCreatePlan contains all records that must become durable with a new job.
+type JobCreatePlan struct {
+	Job           *JobRecord
+	ScheduledAtMs *int64
+	Intent        *DeliveryIntent
+	Unique        *UniqueJobPlan
+}
+
+// JobClaim identifies one received SQS delivery and the worker claiming it.
+type JobClaim struct {
+	JobID             string
+	WorkerID          string
+	ReceiptHandle     string
+	MessageID         string
+	MessageGeneration int64
+	StartedAt         string
+	DeadlineMs        int64
+}
+
+// JobTransitionPlan describes a conditionally fenced job state transition.
+type JobTransitionPlan struct {
+	JobID                      string
+	Queue                      string
+	CreatedAt                  string
+	FromState                  string
+	ToState                    string
+	ExpectedVersion            int64
+	MatchVersion               bool
+	ExpectedDeliveryGeneration int64
+	MatchDeliveryGeneration    bool
+	ExpectedReceiptHandle      string
+	ExpectedWorkerID           string
+	DeadlineBeforeMs           *int64
+	Updates                    map[string]any
+	Intent                     *DeliveryIntent
+	ScheduledAtMs              *int64
+	RetryAtMs                  *int64
+	DeleteScheduled            bool
+	DeleteRetry                bool
+	AddDeadLetter              bool
+	DeleteDeadLetter           bool
+	DeleteCurrentIntent        bool
+	WorkflowAdvance            *WorkflowAdvanceIntent
+}
+
+// WorkflowAdvanceIntent durably links a terminal job transition to workflow accounting.
+type WorkflowAdvanceIntent struct {
+	PK         string `dynamodbav:"PK"`
+	SK         string `dynamodbav:"SK"`
+	WorkflowID string `dynamodbav:"workflow_id"`
+	JobID      string `dynamodbav:"job_id"`
+	Result     string `dynamodbav:"result,omitempty"`
+	Failed     bool   `dynamodbav:"failed"`
+	CreatedAt  string `dynamodbav:"created_at"`
+}
+
+// JobEffectRecord is a durable workflow/cron request to materialize a job.
+type JobEffectRecord struct {
+	PK           string `dynamodbav:"PK"`
+	SK           string `dynamodbav:"SK"`
+	ID           string `dynamodbav:"effect_id"`
+	Kind         string `dynamodbav:"kind"`
+	OwnerID      string `dynamodbav:"owner_id"`
+	JobID        string `dynamodbav:"job_id"`
+	JobJSON      string `dynamodbav:"job_json"`
+	WorkflowID   string `dynamodbav:"workflow_id,omitempty"`
+	WorkflowStep int    `dynamodbav:"workflow_step,omitempty"`
+	CreatedAt    string `dynamodbav:"created_at"`
+}
+
+// WorkflowCreatePlan atomically persists workflow metadata and initial job effects.
+type WorkflowCreatePlan struct {
+	Workflow *WorkflowRecord
+	Effects  []*JobEffectRecord
+}
+
+// WorkflowAdvancePlan atomically records a unique job completion and its effects.
+type WorkflowAdvancePlan struct {
+	WorkflowID          string
+	JobID               string
+	StepIndex           int
+	ExpectedCompleted   int
+	ExpectedFailed      int
+	ExpectedCurrentStep int
+	MatchCurrentStep    bool
+	Completed           int
+	Failed              int
+	CurrentStep         int
+	State               string
+	CompletedAt         string
+	Result              string
+	Effects             []*JobEffectRecord
+}
+
+// CronOccurrencePlan atomically claims and advances one cron occurrence.
+type CronOccurrencePlan struct {
+	Name              string
+	ExpectedNextRunAt string
+	NextRunAt         string
+	LastRunAt         string
+	OccurrenceUnix    int64
+	InstanceJobID     string
+	Effect            *JobEffectRecord
+}
+
+// JobReliabilityStore provides the transactional primitives used by the SQS backend.
+// It is separate from Store so lightweight test stores can continue exercising legacy
+// error paths while the production DynamoDB store uses the reliable implementation.
+type JobReliabilityStore interface {
+	GetUniqueKeyRecord(ctx context.Context, fingerprint string) (*UniqueKeyRecord, error)
+	CreateJobAtomic(ctx context.Context, plan *JobCreatePlan) error
+	ClaimJob(ctx context.Context, claim JobClaim) (*JobRecord, error)
+	TransitionJob(ctx context.Context, plan *JobTransitionPlan) (*JobRecord, error)
+	RefreshClaim(ctx context.Context, jobID, workerID, receiptHandle string, generation, deadlineMs int64) error
+	ListExpiredActiveJobs(ctx context.Context, nowMs int64) ([]*JobRecord, error)
+	ListDeliveryIntents(ctx context.Context, limit int) ([]*DeliveryIntent, error)
+	CompleteDeliveryIntent(ctx context.Context, intent *DeliveryIntent) error
+	RecordDeliveryFailure(ctx context.Context, intent *DeliveryIntent, message string) error
+}
+
+// WorkflowReliabilityStore provides atomic workflow completion and durable effects.
+type WorkflowReliabilityStore interface {
+	CreateWorkflowAtomic(ctx context.Context, plan *WorkflowCreatePlan) error
+	AdvanceWorkflowAtomic(ctx context.Context, plan *WorkflowAdvancePlan) error
+	IsWorkflowCompletionApplied(ctx context.Context, workflowID, jobID string) (bool, error)
+	ListJobEffects(ctx context.Context, limit int) ([]*JobEffectRecord, error)
+	CompleteJobEffect(ctx context.Context, effect *JobEffectRecord) error
+	ListWorkflowAdvances(ctx context.Context, limit int) ([]*WorkflowAdvanceIntent, error)
+	CompleteWorkflowAdvance(ctx context.Context, intent *WorkflowAdvanceIntent) error
+	CancelWorkflowAtomic(ctx context.Context, workflowID, completedAt string) error
+}
+
+// CronReliabilityStore provides per-occurrence multi-replica ownership.
+type CronReliabilityStore interface {
+	ClaimCronOccurrence(ctx context.Context, plan *CronOccurrencePlan) (bool, error)
+}
+
+// WorkerReliabilityStore preserves worker metadata while consuming directives once.
+type WorkerReliabilityStore interface {
+	ConsumeWorkerDirective(ctx context.Context, workerID string) (string, error)
+}
+
 // WorkflowRecord represents a workflow in the state store.
 type WorkflowRecord struct {
 	ID          string `dynamodbav:"PK"`
@@ -141,6 +334,8 @@ type WorkflowRecord struct {
 	CompletedAt string `dynamodbav:"completed_at,omitempty"`
 	Callbacks   string `dynamodbav:"callbacks,omitempty"`
 	JobDefs     string `dynamodbav:"job_defs,omitempty"`
+	CurrentStep int    `dynamodbav:"current_step"`
+	Version     int64  `dynamodbav:"version,omitempty"`
 }
 
 // CronRecord represents a cron job definition in the state store.
@@ -162,26 +357,27 @@ type CronRecord struct {
 // RecordToJob converts a JobRecord to a core.Job.
 func RecordToJob(r *JobRecord) *core.Job {
 	job := &core.Job{
-		ID:          r.ID,
-		Type:        r.Type,
-		State:       r.State,
-		Queue:       r.Queue,
-		Attempt:     r.Attempt,
-		MaxAttempts: r.MaxAttempts,
-		Priority:    r.Priority,
-		TimeoutMs:   r.TimeoutMs,
-		CreatedAt:   r.CreatedAt,
-		EnqueuedAt:  r.EnqueuedAt,
-		StartedAt:   r.StartedAt,
-		CompletedAt: r.CompletedAt,
-		CancelledAt: r.CancelledAt,
-		ScheduledAt: r.ScheduledAt,
-		ExpiresAt:   r.ExpiresAt,
-		Tags:        r.Tags,
+		ID:                  r.ID,
+		Type:                r.Type,
+		State:               r.State,
+		Queue:               r.Queue,
+		Attempt:             r.Attempt,
+		MaxAttempts:         r.MaxAttempts,
+		Priority:            r.Priority,
+		TimeoutMs:           r.TimeoutMs,
+		CreatedAt:           r.CreatedAt,
+		EnqueuedAt:          r.EnqueuedAt,
+		StartedAt:           r.StartedAt,
+		CompletedAt:         r.CompletedAt,
+		CancelledAt:         r.CancelledAt,
+		ScheduledAt:         r.ScheduledAt,
+		ExpiresAt:           r.ExpiresAt,
+		Tags:                r.Tags,
 		RetryDelayMs:        r.RetryDelayMs,
 		VisibilityTimeoutMs: r.VisibilityTimeoutMs,
 		WorkflowID:          r.WorkflowID,
 		WorkflowStep:        r.WorkflowStep,
+		WorkerID:            r.WorkerID,
 	}
 
 	if r.Args != "" {

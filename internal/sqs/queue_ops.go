@@ -7,10 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-
 	"github.com/openjobspec/ojs-backend-sqs/internal/core"
+	"github.com/openjobspec/ojs-backend-sqs/internal/state"
 )
 
 // ListQueues returns all known queues.
@@ -75,68 +73,95 @@ func (b *SQSBackend) SetWorkerState(ctx context.Context, workerID string, state 
 // Heartbeat extends visibility timeout and reports worker state.
 func (b *SQSBackend) Heartbeat(ctx context.Context, workerID string, activeJobs []string, visibilityTimeoutMs int) (*core.HeartbeatResponse, error) {
 	now := time.Now()
-	extended := make([]string, 0)
 
-	// Register worker
-	b.store.PutWorker(ctx, workerID, map[string]string{
+	// Register worker (best-effort presence tracking)
+	if err := b.store.PutWorker(ctx, workerID, map[string]string{
 		"last_heartbeat": core.FormatTime(now),
 		"active_jobs":    strconv.Itoa(len(activeJobs)),
-	})
-
-	// Extend visibility for active jobs
-	timeoutSec := int32(visibilityTimeoutMs / 1000)
-	for _, jobID := range activeJobs {
-		record, err := b.store.GetJob(ctx, jobID)
-		if err != nil || record.State != core.StateActive {
-			continue
-		}
-
-		if record.SQSReceiptHandle != "" {
-			queueURL, err := b.getOrCreateQueueURL(ctx, record.Queue)
-			if err == nil {
-				_, err := b.sqsClient.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
-					QueueUrl:          aws.String(queueURL),
-					ReceiptHandle:     aws.String(record.SQSReceiptHandle),
-					VisibilityTimeout: timeoutSec,
-				})
-				if err == nil {
-					extended = append(extended, jobID)
-				}
-			}
-		}
+	}); err != nil {
+		b.logger.Warn("heartbeat: failed to register worker", "worker_id", workerID, "error", err)
 	}
 
-	// Determine directive
-	directive := "continue"
-
-	// Check for stored worker directive
-	storedDirective, err := b.store.GetWorkerDirective(ctx, workerID)
-	if err == nil && storedDirective != "" {
-		directive = storedDirective
-	}
-
-	// Check job metadata for test_directive (used in conformance tests)
-	if directive == "continue" {
-		for _, jobID := range activeJobs {
-			record, err := b.store.GetJob(ctx, jobID)
-			if err == nil && record.Meta != "" {
-				var metaObj map[string]any
-				if json.Unmarshal([]byte(record.Meta), &metaObj) == nil {
-					if td, ok := metaObj["test_directive"]; ok {
-						if tdStr, ok := td.(string); ok && tdStr != "" {
-							directive = tdStr
-							break
-						}
-					}
-				}
-			}
-		}
+	extended := b.extendActiveJobsVisibility(ctx, workerID, activeJobs, visibilityTimeoutMs)
+	directive, err := b.resolveWorkerDirective(ctx, workerID, activeJobs)
+	if err != nil {
+		return nil, err
 	}
 
 	return &core.HeartbeatResponse{
-		State:        "active",
+		State:        "running",
 		Directive:    directive,
 		JobsExtended: extended,
 		ServerTime:   core.FormatTime(now),
 	}, nil
+}
+
+// extendActiveJobsVisibility extends the SQS visibility timeout for each active
+// job still owned by the worker, returning the IDs that were successfully extended.
+func (b *SQSBackend) extendActiveJobsVisibility(ctx context.Context, workerID string, activeJobs []string, visibilityTimeoutMs int) []string {
+	extended := make([]string, 0)
+	visibilitySeconds := clampVisibilityTimeoutSeconds(visibilityTimeoutMs)
+	for _, jobID := range activeJobs {
+		record, err := b.store.GetJob(ctx, jobID)
+		if err != nil || record.State != core.StateActive || record.SQSReceiptHandle == "" || record.WorkerID != workerID {
+			continue
+		}
+
+		if store, ok := b.reliabilityStore(); ok {
+			deadline := time.Now().Add(time.Duration(visibilitySeconds) * time.Second).UnixMilli()
+			if err := store.RefreshClaim(ctx, jobID, workerID, record.SQSReceiptHandle, record.DeliveryGeneration, deadline); err != nil {
+				continue
+			}
+		}
+
+		if err := b.changeMessageVisibility(ctx, record.Queue, record.SQSReceiptHandle, visibilitySeconds); err != nil {
+			b.logger.Warn("heartbeat: failed to extend visibility", "job_id", jobID, "queue", record.Queue, "error", err)
+			if store, ok := b.reliabilityStore(); ok {
+				if resetErr := store.RefreshClaim(ctx, jobID, workerID, record.SQSReceiptHandle, record.DeliveryGeneration, time.Now().UnixMilli()); resetErr != nil {
+					b.logger.Warn("heartbeat: failed to release failed extension", "job_id", jobID, "error", resetErr)
+				}
+			}
+			continue
+		}
+		extended = append(extended, jobID)
+	}
+	return extended
+}
+
+// resolveWorkerDirective returns the directive to send to a worker: a stored
+// directive takes precedence, otherwise a per-job test_directive (used by
+// conformance tests) is honored, defaulting to "continue".
+func (b *SQSBackend) resolveWorkerDirective(ctx context.Context, workerID string, activeJobs []string) (string, error) {
+	if store, ok := b.store.(state.WorkerReliabilityStore); ok {
+		stored, err := store.ConsumeWorkerDirective(ctx, workerID)
+		if err != nil {
+			return "", err
+		}
+		if stored != "" {
+			return stored, nil
+		}
+	} else {
+		stored, err := b.store.GetWorkerDirective(ctx, workerID)
+		if err != nil {
+			return "", err
+		}
+		if stored != "" {
+			return stored, nil
+		}
+	}
+
+	for _, jobID := range activeJobs {
+		record, err := b.store.GetJob(ctx, jobID)
+		if err != nil || record.Meta == "" {
+			continue
+		}
+		var metaObj map[string]any
+		if json.Unmarshal([]byte(record.Meta), &metaObj) != nil {
+			continue
+		}
+		if td, ok := metaObj["test_directive"].(string); ok && td != "" {
+			return td, nil
+		}
+	}
+	return "continue", nil
 }
